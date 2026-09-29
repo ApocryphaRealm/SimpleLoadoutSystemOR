@@ -6,6 +6,7 @@
 #include "Loadouts.h"
 #include "Menus.h"
 #include "Settings.h"
+#include "TesThread.h"
 #include "TestBenchAPI.h"
 
 namespace tool
@@ -41,6 +42,8 @@ namespace tool
 			j["menu_mode"] = menus::AnyMenuOpen();
 			const auto g = gamethread::GetStatus();
 			j["game_thread"] = { { "installed", g.installed }, { "reads", g.reads }, { "rewritten", g.rewritten }, { "chained_after", g.previousTarget } };
+			const auto t = testhread::GetStatus();
+			j["tes_thread"] = { { "installed", t.installed }, { "thread", t.thread }, { "calls", t.calls }, { "queued", t.queued } };
 			j["queued_steps"] = gamethread::Queued();
 			j["loadout_count"] = settings::Get().count;
 			const auto b = bar::GetSnapshot();
@@ -83,12 +86,12 @@ namespace tool
 				Write(a_sink, a_write, { { "ok", answered && ok }, { "console", console::Status() }, { "command", cmd } });
 				return;
 			}
-			if (op == "unequip" || op == "store" || op == "take" || op == "equip") {
+			if (op == "unequip" || op == "store" || op == "take" || op == "equip" || op == "wear") {
 				const auto id = static_cast<std::uint32_t>(std::stoul(args.value("formId", "0"), nullptr, 16));
 				const int slot = args.value("slot", 0);
 				std::string result;
 				const bool answered = gamethread::Call([&] {
-					result = op == "unequip" ? loadouts::Unequip(id) : op == "store" ? loadouts::Store(id, slot) : op == "take" ? loadouts::Take(slot) : loadouts::Equip(id);
+					result = op == "unequip" ? loadouts::Unequip(id) : op == "store" ? loadouts::Store(id, slot) : op == "take" ? loadouts::Take(slot) : op == "wear" ? loadouts::Wear(id) : loadouts::Equip(id);
 				}, 5s);
 				Write(a_sink, a_write, { { "ok", answered }, { "result", answered ? result : "the game thread did not answer in 5 s" } });
 				return;

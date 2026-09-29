@@ -5,8 +5,10 @@
 #include "GameThread.h"
 #include "Loadouts.h"
 #include "Menus.h"
+#include "Push.h"
 #include "Reflect.h"
 #include "Settings.h"
+#include "TesThread.h"
 
 namespace tool { bool Register(); }
 
@@ -52,6 +54,13 @@ namespace
 		// the plugin's records may load after the player object exists), a dozen times at most.
 		static int storageTries = 0;
 		static auto nextStorageTry = std::chrono::steady_clock::now();
+		static bool tesTried = false;
+		if (!tesTried) {
+			tesTried = true;
+			testhread::Install();   // the switch queue on the Gamebryo thread (TesThread.h)
+			push::Install();        // the game's inventory list rebuild, run after a switch (Push.h)
+			WriteSelfCheck();
+		}
 		if (!storageInit && RE::PlayerCharacter::GetSingleton() && now >= nextStorageTry) {
 			++storageTries;
 			nextStorageTry = now + 5s;

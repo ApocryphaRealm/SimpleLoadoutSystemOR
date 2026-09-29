@@ -2,6 +2,7 @@
 
 #include "Loadouts.h"
 #include "Menus.h"
+#include "Push.h"
 #include "Settings.h"
 #include "Ue.h"
 
@@ -437,6 +438,30 @@ namespace bar
 			return ok;
 		}
 
+		// Slate's focus itself, on the box's button: the subsystem's NavigateToWidget alone leaves the focus on the list
+		// entry that had it (the entry fires OnFocusReceived 2 ms after the ask, log 09:29:49 2026-09-29), so the
+		// button is focused directly as well - now and again on the next frame, after the list's own restore.
+		void SlateFocus(UE::UObject* a_button)
+		{
+			if (!a_button || !reflect::IsLive(a_button)) {
+				return;
+			}
+			ue::Call f(a_button, L"SetFocus");
+			if (f) {
+				f.Run();
+			}
+		}
+
+		void FocusBox(int a_index)
+		{
+			if (g_entries.empty()) {
+				return;
+			}
+			UE::UObject* button = g_entries[static_cast<std::size_t>(std::clamp(a_index, 0, static_cast<int>(g_entries.size()) - 1))].button;
+			SlateFocus(button);
+			gamethread::Post([button] { if (g_focused) { SlateFocus(button); } });
+		}
+
 		int ListElementIndex()
 		{
 			ue::Call c(g_listWrapper, L"GetCurrentElementIndex");
@@ -447,14 +472,191 @@ namespace bar
 			return c.Get<std::int32_t>("ReturnValue");
 		}
 
-		// the entries' events around a hand-off (diagnosis of the row that lights up when the focus leaves the list)
+		// ---- the game's own functions, by name prefix (Blueprint input events carry a generated suffix) -------------
+		UE::UFunction* FunctionByPrefix(UE::UObject* a_obj, std::string_view a_prefix)
+		{
+			for (UE::UStruct* s = a_obj ? a_obj->GetClass() : nullptr; s; s = s->superStruct) {
+				auto* child = *reinterpret_cast<UE::UField**>(reinterpret_cast<std::uint8_t*>(s) + 0x48);   // UStruct::children
+				for (; child; child = child->next) {
+					if (ue::NameOf(child).starts_with(a_prefix)) {
+						return reinterpret_cast<UE::UFunction*>(child);
+					}
+				}
+			}
+			return nullptr;
+		}
+
+		UE::UObject* ViewModel();
+
+		// The category pages: ELegacyInventoryMenuPage's values, read from the UEnum once (UE5 UEnum::Names at 0x40 - a
+		// TArray of {FName, int64}); the entries named *_MAX or None are not pages.
+		const std::vector<std::int64_t>& Pages()
+		{
+			static std::vector<std::int64_t> pages;
+			static bool read = false;
+			if (!read) {
+				read = true;
+				if (auto* e = ue::Find(L"/Script/Altar.ELegacyInventoryMenuPage")) {
+					struct Pair { UE::FName name; std::int64_t value; };
+					struct Arr { Pair* data; std::int32_t num, max; };
+					auto* names = reinterpret_cast<Arr*>(reinterpret_cast<std::uint8_t*>(e) + 0x40);
+					std::string listed;
+					for (std::int32_t i = 0; names->data && i < names->num && i < 64; ++i) {
+						const std::string n = pe::Utf8(names->data[i].name.ToString());
+						listed += std::format("{}{}={}", i ? ", " : "", n, names->data[i].value);
+						if (!n.ends_with("_MAX") && !n.ends_with("::None")) {
+							pages.push_back(names->data[i].value);
+						}
+					}
+					logger::info("bar: inventory pages: {}", listed);
+				}
+			}
+			return pages;
+		}
+
+		// LT / RT on the row: the page moves through the view model's own setter (the widget's tab input events fired
+		// but changed nothing, 2026-09-29); the main part follows the field-notify binding
+		void FireTab(bool a_next)
+		{
+			UE::UObject* vm = ViewModel();
+			const auto& pages = Pages();
+			if (!vm || pages.empty()) {
+				logger::info("bar: no view model / pages for the tab change");
+				return;
+			}
+			ue::Call get(vm, L"GetCurrentPageInventory");
+			if (!get) {
+				return;
+			}
+			get.Run();
+			const auto current = static_cast<std::int64_t>(get.Get<std::uint8_t>("ReturnValue"));
+			std::size_t at = 0;
+			for (std::size_t i = 0; i < pages.size(); ++i) {
+				if (pages[i] == current) {
+					at = i;
+				}
+			}
+			const std::size_t next = (at + (a_next ? 1 : pages.size() - 1)) % pages.size();
+			ue::Call set(vm, L"SetCurrentPageInventory");
+			if (set) {
+				set.Set("NewPage", static_cast<std::uint8_t>(pages[next]));
+				set.Run();
+			}
+			logger::info("bar: page {} -> {} ({})", current, pages[next], set ? "SetCurrentPageInventory called" : "no setter");
+		}
+
+		// the live inventory view model (not its class default) and the length of one of its item arrays
+		UE::UObject* ViewModel()
+		{
+			auto* cls = ue::Class(L"/Script/Altar.VInventoryMenuViewModel");
+			for (UE::UObject* o : cls ? reflect::Instances(cls) : std::vector<UE::UObject*>{}) {
+				if (o && o->GetClass() == cls && !ue::NameOf(o).starts_with("Default__")) {
+					return o;
+				}
+			}
+			return nullptr;
+		}
+
+		int ArrayNum(UE::UObject* a_obj, std::string_view a_name)
+		{
+			const auto off = a_obj ? reflect::Offset(a_obj->GetClass(), a_name) : -1;
+			return off >= 0 ? *reinterpret_cast<std::int32_t*>(reinterpret_cast<std::uint8_t*>(a_obj) + off + 8) : -1;
+		}
+
+		// after a switch: the view model's counts (its rows follow the rebuild the switch queued on the TES side)
+		void RefreshList()
+		{
+			UE::UObject* widget = menus::InventoryWidget();
+			UE::UObject* vm = ViewModel();
+			const int itemsBefore = ArrayNum(vm, "Items"), pageBefore = ArrayNum(vm, "CurrentPageItemsInventory");
+			(void)widget;
+			logger::info("bar: after the switch the view model holds {} item(s), {} on the page (the game's rebuild follows)", itemsBefore, pageBefore);
+		}
+
+		// ---- the list's selection is OURS (the owner, 2026-09-29: "our mod owns the highlight") -------------------
+		// The game keeps two things apart: the focused entry and the list's selected (lit) item. Once they drift - a
+		// hand-off to the row, a mouse hover, a rebuild - Up from the top row jumps to the stale selected item instead of
+		// reaching the row. So: whenever an entry receives the focus, it becomes the selected item; the row's focus
+		// clears the selection; the return to the list selects its top row.
+		UE::UObject* EntryItem(UE::UObject* a_entry)
+		{
+			static UE::UObject* lib = ue::Find(L"/Script/UMG.Default__UserObjectListEntryLibrary");
+			ue::Call get(lib, L"GetListItemObject");
+			if (!get) {
+				return nullptr;
+			}
+			get.Set("UserObject", a_entry);
+			get.Run();
+			return get.Get<UE::UObject*>("ReturnValue");
+		}
+
+		void SelectEntry(UE::UObject* a_entry)
+		{
+			UE::UObject* item = EntryItem(a_entry);
+			if (!item || !g_list || !reflect::IsLive(g_list)) {
+				return;
+			}
+			ue::Call sel(g_list, L"BP_SetSelectedItem");
+			if (sel) {
+				sel.Set("Item", item);
+				sel.Run();
+			}
+		}
+
+		void SelectRow(int a_index)
+		{
+			if (!g_list || !reflect::IsLive(g_list)) {
+				return;
+			}
+			ue::Call sel(g_list, L"SetSelectedIndex");
+			if (sel) {
+				sel.Set("Index", std::int32_t(a_index));
+				sel.Run();
+			}
+		}
+
+		void ClearListSelection()
+		{
+			if (!g_list || !reflect::IsLive(g_list)) {
+				return;
+			}
+			ue::Call clear(g_list, L"ClearSelection");
+			if (clear) {
+				clear.Run();
+			}
+		}
+
+		// the focused row as the game's navigable list counts it, the selected item as a fallback
+		int OwnedRow()
+		{
+			const int element = ListElementIndex();
+			return element >= 0 ? element : SelectedRow();
+		}
+
+		// the entries' events: a focused entry becomes the selected one; the rest is hand-off diagnosis
 		std::chrono::steady_clock::time_point g_handOffAt{};
 		void OnEntryEvent(UE::UObject* a_obj, UE::UFunction* a_fn, void* a_params)
 		{
-			if (!a_obj || !a_fn || std::chrono::steady_clock::now() - g_handOffAt > 1500ms) {
+			if (!a_obj || !a_fn) {
 				return;
 			}
 			const std::string n = pe::FunctionName(a_fn);
+			if (n == "OnFocusReceived") {
+				if (!g_focused) {
+					SelectEntry(a_obj);
+				} else {
+					static std::chrono::steady_clock::time_point last{};
+					const auto now = std::chrono::steady_clock::now();
+					logger::info("bar: entry {:p} took the focus while the row had it{}", static_cast<void*>(a_obj), now - last > 100ms ? " - the box takes it back" : "");
+					if (now - last > 100ms) {
+						last = now;
+						gamethread::Post([] { if (g_focused) { FocusBox(g_cursor); } });
+					}
+				}
+			}
+			if (std::chrono::steady_clock::now() - g_handOffAt > 1500ms) {
+				return;
+			}
 			if (n == "OnMouseMove" || n == "OnPaint" || n == "Tick" || n == "OnAnalogValueChanged") {
 				return;
 			}
@@ -656,6 +858,12 @@ namespace bar
 			// slot settings it had
 			g_listWrapper = FindByClass(contentBox, "InventoryListView", 4);
 			g_list = FindByClass(TreeRoot(g_listWrapper), "ListView", 3);
+			if (auto* entryClass = ue::Class(L"/Game/UI/Original/GameMenuLayer/Inventory/MainPart/WBP_OriginalMenu_InventoryEntry.WBP_OriginalMenu_InventoryEntry_C")) {
+				static bool watched = false;
+				if (!watched) {
+					watched = pe::Watch(entryClass, &OnEntryEvent);   // the selection follows the focus from the first row on
+				}
+			}
 			if (g_listWrapper) {
 				static bool watched = false;
 				if (!watched) {
@@ -748,9 +956,28 @@ namespace bar
 		std::chrono::steady_clock::time_point g_upHeldSince{};
 		bool  g_upHeld = false;
 
+		// The hidden mouse cursor rests over the list: when the focus moves to a box, Slate re-evaluates the widget under
+		// it, the entry there gets OnMouseEnter, and the wrapper's focus-on-hover hands it the focus (the "teleport" to
+		// whatever item lay under the cursor, log 09:23:33 2026-09-29). Hover-focus is off while a box has the focus.
+		void HoverFocus(bool a_on)
+		{
+			if (!g_listWrapper || !reflect::IsLive(g_listWrapper)) {
+				return;
+			}
+			for (const char* n : { "bShouldFocusOnHover", "bNavigateOnHover" }) {
+				if (const auto off = reflect::Offset(g_listWrapper->GetClass(), n); off >= 0) {
+					*(reinterpret_cast<std::uint8_t*>(g_listWrapper) + off) = a_on ? 1 : 0;
+				}
+			}
+		}
+
 		void Focus(bool a_on)
 		{
 			g_focused = a_on;
+			HoverFocus(!a_on);
+			if (a_on) {
+				ClearListSelection();   // nothing in the list stays lit while a box has the focus
+			}
 			Refresh();
 			std::scoped_lock l(g_lock);
 			g_snap.focused = a_on;
@@ -778,10 +1005,16 @@ namespace bar
 		void Choose()
 		{
 			const int target = g_cursor == loadouts::Active() ? -1 : g_cursor;
-			// The switch itself stays DISARMED until the engine's equip route is proven (Actor::UnequipObject took the
-			// game down on 2026-09-29): the press is logged and the highlight moves, nothing moves in the inventory.
+			// The switch runs here and only here (the owner, 2026-09-29): a box navigated to and activated with A, the
+			// inventory open. It is posted to the game thread; the row refreshes in the task queued behind it.
 			PlayUiSound(kSoundSelect);
-			logger::info("bar: A on {} -> would {} (switch disarmed until the equip route is proven)", settings::Name(g_cursor), target < 0 ? "deselect" : "select");
+			std::string why;
+			loadouts::SetOnSwitched([] { Refresh(); RefreshList(); });
+			if (loadouts::Request(target, why)) {
+				logger::info("bar: A on {} -> {} - switch posted to the TES thread", settings::Name(g_cursor), target < 0 ? "deselect" : "select");
+			} else {
+				logger::info("bar: A on {} -> {} refused: {}", settings::Name(g_cursor), target < 0 ? "deselect" : "select", why);
+			}
 			Refresh();
 		}
 	}
@@ -848,8 +1081,8 @@ namespace bar
 		constexpr WORD kNav = XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B;
 		if (!g_focused) {
 			if (a_pressed & XINPUT_GAMEPAD_DPAD_UP) {
-				const int row = SelectedRow();
-				logger::info("bar: D-pad Up with the list's selected row {} (list {:p})", row, static_cast<void*>(g_list));
+				const int row = OwnedRow();
+				logger::info("bar: D-pad Up with the list's focused row {} (list {:p})", row, static_cast<void*>(g_list));
 				if (row == 0 || row == -1) {
 					g_swallow |= XINPUT_GAMEPAD_DPAD_UP;   // the game never steps onto anything above the list
 					const int i = std::clamp(g_cursor, 0, static_cast<int>(g_entries.size()) - 1);
@@ -870,6 +1103,7 @@ namespace bar
 					}
 					NavigateTo(g_entries[static_cast<std::size_t>(i)].button, "the loadout row");
 					Focus(true);
+					FocusBox(i);
 				} else if (row == -2) {
 					g_upHeld = true;   // no index to read: a hold reaches the row
 					g_upHeldSince = Clock::now();
@@ -888,6 +1122,7 @@ namespace bar
 			if (a_pressed & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) {
 				Move((a_pressed & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : +1);
 				NavigateTo(g_entries[static_cast<std::size_t>(std::clamp(g_cursor, 0, count - 1))].button, "the next box");
+				FocusBox(g_cursor);
 			}
 			if (a_pressed & (XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_B)) {
 				Focus(false);
@@ -897,10 +1132,22 @@ namespace bar
 				ue::Call top(g_listWrapper, L"NavigateToIndex");
 				top.Set("NewIndex", std::int32_t(0));
 				top.Run();
+				SelectRow(0);
 			}
 			if (a_pressed & XINPUT_GAMEPAD_A) {
 				Choose();   // the button has no Slate focus, so A is ours while the row is active
 			}
+			// the triggers change the category from the row too (the owner, 2026-09-29): edges on the analog values
+			static bool ltHeld = false, rtHeld = false;
+			const bool lt = a_pad.bLeftTrigger > 120, rt = a_pad.bRightTrigger > 120;
+			if (lt && !ltHeld) {
+				FireTab(false);
+			}
+			if (rt && !rtHeld) {
+				FireTab(true);
+			}
+			ltHeld = lt;
+			rtHeld = rt;
 			g_swallow |= static_cast<WORD>(a_pad.wButtons & kNav);
 		}
 		a_pad.wButtons &= ~g_swallow;

@@ -1,6 +1,8 @@
 #include "Loadouts.h"
 
 #include "GameThread.h"
+#include "Push.h"
+#include "TesThread.h"
 #include "Settings.h"
 
 namespace loadouts
@@ -18,6 +20,7 @@ namespace loadouts
 		int               g_found = 0;
 		std::atomic<bool> g_busy{ false };
 		std::string       g_storageNote;
+		std::function<void()> g_onSwitched;
 
 		bool IsGear(RE::TESBoundObject* a_object)
 		{
@@ -48,6 +51,12 @@ namespace loadouts
 			}
 			a_left = a_list->GetExtraData(RE::EXTRA_DATA_TYPE::WornLeft) != nullptr;
 			return a_left || a_list->GetExtraData(RE::EXTRA_DATA_TYPE::Worn) != nullptr;
+		}
+
+		// the console's NoUnequip lock (player.equipitem <id> 1) on a worn piece - a switch must never leave one
+		bool Locked(RE::ExtraDataList* a_list)
+		{
+			return a_list && a_list->GetExtraData(RE::EXTRA_DATA_TYPE::CannotWear) != nullptr;
 		}
 
 		bool HasOwnData(RE::ExtraDataList* a_list)
@@ -108,24 +117,68 @@ namespace loadouts
 
 		// Everything worn comes off: into the old loadout's container when there is one (quest items only come off and
 		// stay), otherwise it stays in the inventory (it belonged to no loadout).
+		//
+		// Two passes (2026-09-29): the engine will not move a WORN armour piece out of the inventory - RemoveItem took
+		// the sword and left the Legion set on the player ("you cannot unequip this item") - so every piece comes off
+		// first, and only then is each one found again and moved. Found again, not remembered: unequipping can free the
+		// ExtraDataList the piece was worn through (logic library: an ExtraDataList handed to the engine is not yours
+		// afterwards), so the second pass takes a fresh unworn list for that object, one with own data when the piece
+		// had own data, or none for a plain item.
+		struct ToStore
+		{
+			RE::TESBoundObject* object;
+			std::int32_t        count;
+			bool                ownData;
+		};
+
+		RE::ExtraDataList* UnwornList(RE::PlayerCharacter* a_player, RE::TESBoundObject* a_object, bool a_ownData)
+		{
+			auto* inv = Items(a_player);
+			if (!inv) {
+				return nullptr;
+			}
+			for (RE::ItemChange* item : *inv) {
+				if (!item || item->object != a_object || !item->extraData) {
+					continue;
+				}
+				for (RE::ExtraDataList* xl : *item->extraData) {
+					bool left = false;
+					if (xl && !IsWorn(xl, left) && HasOwnData(xl) == a_ownData) {
+						return xl;
+					}
+				}
+			}
+			return nullptr;
+		}
+
 		int StoreWorn(RE::PlayerCharacter* a_player, int a_into, int& a_questKept)
 		{
 			RE::TESObjectREFR* storage = a_into >= 0 ? g_storage[static_cast<std::size_t>(a_into)] : nullptr;
-			int moved = 0;
+			std::vector<ToStore> toStore;
 			for (const auto& w : WornEntries(a_player)) {
 				const std::string name = NameOf(w.item->object);
+				const bool ownData = HasOwnData(w.extra);
+				// Actor::UnequipObject (address library): the actor's full unequip path - see Wear
+				a_player->UnequipObject(w.item->object, w.count, w.extra, false, true);   // no lock (see Wear)
 				if (storage && !w.quest) {
-					// Removing a worn item unequips it; the piece keeps its own ExtraDataList (health, charge, name).
-					a_player->RemoveItem(w.item->object, w.extra, w.count, false, false, storage, nullptr, nullptr, false, false);
-					logger::debug("store: {} x{} -> {}", name, w.count, settings::Name(a_into));
-					++moved;
+					toStore.push_back({ w.item->object, w.count, ownData });
+					logger::debug("unequip: {} x{} (to be stored)", name, w.count);
 				} else {
 					if (w.quest && storage) {
 						++a_questKept;
 					}
-					a_player->UnequipObject(w.item->object, w.count, w.extra, true, true);   // the address-library function, not the vtable slot
 					logger::debug("unequip: {} x{} (stays in the inventory{})", name, w.count, w.quest ? ", quest item" : "");
 				}
+			}
+			int moved = 0;
+			for (const auto& s : toStore) {
+				RE::ExtraDataList* xl = UnwornList(a_player, s.object, s.ownData);
+				if (!xl && s.ownData) {
+					xl = UnwornList(a_player, s.object, false);   // the own data went with the worn list: any copy, then
+				}
+				a_player->RemoveItem(s.object, xl, s.count, false, false, storage, nullptr, nullptr, false, false);
+				logger::debug("store: {} x{}{} -> {}", NameOf(s.object), s.count, xl ? "" : " (no list)", settings::Name(a_into));
+				++moved;
 			}
 			return moved;
 		}
@@ -137,19 +190,35 @@ namespace loadouts
 			bool                ownData;
 		};
 
+		// The one equip call of the mod: Actor::EquipObject (address library) - the actor's full equip path, what the
+		// game's own equip runs. The vtable's AddWornItem only marked the piece worn: the sword came back "worn" but the
+		// actor's weapon state stayed stale, and later weapon swaps showed the old sword (2026-09-29). Both crashed off
+		// the TES thread; on it they are the right calls.
+		bool Wear(RE::PlayerCharacter* a_player, RE::TESBoundObject* a_object, std::int32_t a_count, RE::ExtraDataList* a_extra)
+		{
+			// the last argument is the console's NoUnequip lock (player.equipitem <id> 1): true made every restored piece
+			// impossible to take off ("you cannot unequip this item", 2026-09-29)
+			a_player->EquipObject(a_object, a_count, a_extra, false, false);
+			return true;
+		}
+
 		// The loadout's container empties into the inventory, then every piece is equipped from where it now sits.
 		int Restore(RE::PlayerCharacter* a_player, int a_from)
 		{
 			auto* storage = g_storage[static_cast<std::size_t>(a_from)];
 			auto* items = Items(storage);
+			logger::debug("restore from {}: storage {:p}, item list {:p}", settings::Name(a_from), static_cast<void*>(storage), static_cast<void*>(items));
 			if (!storage || !items) {
 				return 0;
 			}
 			std::vector<Piece> pieces;
+			std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> stacks;   // the move happens from this copy, not the list it empties
 			for (RE::ItemChange* item : *items) {
+				logger::debug("restore: container entry {} x{}", item && item->object ? NameOf(item->object) : "null", item ? item->count : 0);
 				if (!item || !item->object || item->count <= 0) {
 					continue;
 				}
+				stacks.emplace_back(item->object, item->count);
 				std::int32_t listed = 0;
 				if (item->extraData) {
 					for (RE::ExtraDataList* xl : *item->extraData) {
@@ -166,11 +235,9 @@ namespace loadouts
 			}
 			// The move may merge or free the ExtraDataList it is given (the Skyrim mod's 1.0.0 crash), so nothing is
 			// kept across it: the whole container is moved, then each piece is found again in the player's inventory.
-			for (RE::ItemChange* item : *items) {
-				if (!item || !item->object || item->count <= 0) {
-					continue;
-				}
-				storage->RemoveItem(item->object, nullptr, item->count, false, false, a_player, nullptr, nullptr, false, false);
+			for (const auto& [object, count] : stacks) {
+				storage->RemoveItem(object, nullptr, count, false, false, a_player, nullptr, nullptr, false, false);
+				logger::debug("restore: {} x{} -> the player", NameOf(object), count);
 			}
 			int restored = 0;
 			auto* inv = Items(a_player);
@@ -193,9 +260,9 @@ namespace loadouts
 						}
 					}
 				}
-				a_player->EquipObject(p.object, p.count, extra, true, true);   // the address-library function, not the vtable slot
-				const bool ok = true;
-				logger::debug("equip: {} x{}{} -> {}", NameOf(p.object), p.count, extra ? " (own data)" : "", ok ? "worn" : "REFUSED");
+				const bool ok = Wear(a_player, p.object, p.count, extra);
+				logger::debug("equip: {} x{}{} - EquipObject called", NameOf(p.object), p.count, extra ? " (own data)" : "");
+				(void)ok;
 				restored += ok ? 1 : 0;
 			}
 			return restored;
@@ -219,13 +286,29 @@ namespace loadouts
 			int questKept = 0;
 			const int stored = StoreWorn(player, from, questKept);
 			const int restored = a_to >= 0 ? Restore(player, a_to) : 0;
+			int locked = 0;
+			for (const auto& w : WornEntries(player)) {
+				if (Locked(w.extra)) {
+					++locked;
+					logger::warn("switch: {} is LOCKED (CannotWear) after the restore - it could not be taken off again", NameOf(w.item->object));
+				}
+			}
 			SetActive(a_to);
-			logger::info("switch {} -> {}: {} piece(s) stored, {} restored{}", from >= 0 ? settings::Name(from) : "none",
+			const bool rebuilt = push::Rebuild();   // the menu's rows follow the game's own push (Push.h)
+			logger::info("switch {} -> {}: {} piece(s) stored, {} restored{}{}", from >= 0 ? settings::Name(from) : "none",
 				a_to >= 0 ? settings::Name(a_to) : "none", stored, restored,
-				questKept ? std::format(", {} quest item(s) kept in the inventory", questKept) : "");
+				questKept ? std::format(", {} quest item(s) kept in the inventory", questKept) : "", rebuilt ? ", list rebuild queued" : "");
+			if (restored > 0) {
+				logger::info("switch: {} of the {} restored piece(s) locked", locked, restored);
+			}
 			g_busy = false;
+			if (g_onSwitched) {
+				gamethread::Post(g_onSwitched);   // the menu's row lives on the UE game thread
+			}
 		}
 	}
+
+	void SetOnSwitched(std::function<void()> a_fn) { g_onSwitched = std::move(a_fn); }
 
 	void Init()
 	{
@@ -325,7 +408,12 @@ namespace loadouts
 			a_why = "a switch is already running";
 			return false;
 		}
-		gamethread::Post([a_loadout] { Switch(a_loadout); });
+		if (!testhread::Installed()) {
+			g_busy = false;
+			a_why = "the TES thread is not hooked yet";
+			return false;
+		}
+		testhread::Post([a_loadout] { Switch(a_loadout); });   // the engine's equipment path runs on the TES thread only
 		return true;
 	}
 
@@ -337,7 +425,7 @@ namespace loadouts
 			return out;
 		}
 		for (const auto& w : WornEntries(player)) {
-			out.push_back({ w.item->object->GetFormID(), NameOf(w.item->object), w.count, w.left, w.quest, HasOwnData(w.extra) });
+			out.push_back({ w.item->object->GetFormID(), NameOf(w.item->object), w.count, w.left, w.quest, HasOwnData(w.extra), Locked(w.extra) });
 		}
 		return out;
 	}
@@ -384,9 +472,11 @@ namespace loadouts
 		if (!xl) {
 			return "not worn";
 		}
-		logger::info("spike: UnequipObject {} (list {:p})", NameOf(item->object), static_cast<void*>(xl));
-		const bool ok = player->UnequipObject(item->object, 1, xl, true, true);
-		return ok ? "unequipped" : "UnequipObject returned false";
+		bool left = false;
+		IsWorn(xl, left);
+		logger::info("spike: RemoveWornItem {} (list {:p}, left {})", NameOf(item->object), static_cast<void*>(xl), left);
+		const bool ok = player->RemoveWornItem(item->object, 1, xl, left, true);
+		return ok ? "unequipped" : "RemoveWornItem returned false";
 	}
 
 	std::string Store(std::uint32_t a_formID, int a_slot)
@@ -435,8 +525,21 @@ namespace loadouts
 		}
 		auto* xl = FirstList(item, false);
 		logger::info("spike: EquipObject {} (list {:p})", NameOf(item->object), static_cast<void*>(xl));
-		player->EquipObject(item->object, 1, xl, true, true);
+		player->EquipObject(item->object, 1, xl, false, false);   // no lock (see Wear)
 		return "EquipObject called";
+	}
+
+	std::string Wear(std::uint32_t a_formID)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* item = player ? Carried(player, a_formID) : nullptr;
+		if (!item) {
+			return "not carried";
+		}
+		auto* xl = FirstList(item, false);
+		logger::info("spike: AddWornItem {} (list {:p})", NameOf(item->object), static_cast<void*>(xl));
+		const bool ok = Wear(player, item->object, 1, xl);
+		return ok ? "worn" : "AddWornItem returned false";
 	}
 
 	json Contents()
@@ -446,7 +549,7 @@ namespace loadouts
 		j["storage"] = g_storageNote;
 		json worn = json::array();
 		for (const auto& w : Worn()) {
-			worn.push_back({ { "name", w.name }, { "formId", std::format("{:08X}", w.formID) }, { "count", w.count }, { "left", w.left }, { "quest", w.quest }, { "extra", w.extra } });
+			worn.push_back({ { "name", w.name }, { "formId", std::format("{:08X}", w.formID) }, { "count", w.count }, { "left", w.left }, { "quest", w.quest }, { "extra", w.extra }, { "locked", w.locked } });
 		}
 		j["worn"] = worn;
 		json storage = json::array();

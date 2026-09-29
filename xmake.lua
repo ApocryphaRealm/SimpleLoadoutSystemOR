@@ -22,7 +22,7 @@ set_warnings("allextra")
 add_rules("mode.debug", "mode.releasedbg")
 add_rules("plugin.vsxmake.autoupdate")
 
-add_requires("nlohmann_json")
+add_requires("minhook", "nlohmann_json")
 
 target("SimpleLoadoutSystem")
     add_rules("commonlibob64.plugin", {
@@ -30,7 +30,7 @@ target("SimpleLoadoutSystem")
         author = "ApocryphaRealm",
         description = "Simple Loadout System: loadout buttons in the inventory, one storage container per loadout (Oblivion Remastered)"
     })
-    add_packages("nlohmann_json")
+    add_packages("minhook", "nlohmann_json")
     add_syslinks("user32")
     on_load(function (target)
         target:add("defines", "SLS_VERSION=\"" .. (target:version() or "0.0.0") .. "\"")

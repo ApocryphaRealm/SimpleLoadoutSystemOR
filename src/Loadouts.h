@@ -19,6 +19,7 @@ namespace loadouts
 	// Select a loadout (0-based), or -1 to deselect. False - with the reason - when it cannot happen now (in combat,
 	// the storage missing, a switch running). The move itself is posted to the game thread.
 	bool Request(int a_loadout, std::string& a_why);
+	void SetOnSwitched(std::function<void()> a_fn);   // run on the UE game thread after each switch (the row refreshes)
 
 	json Contents();            // the driving tool: active, worn pieces, each container's items, the storage state
 
@@ -30,12 +31,14 @@ namespace loadouts
 		bool          left;
 		bool          quest;
 		bool          extra;    // the piece has its own extra data (health, charge, a name)
+		bool          locked;   // ExtraCannotWear on it: the console's NoUnequip lock - never ours (2026-09-29)
 	};
 	std::vector<WornPiece> Worn();   // game thread
 
 	// The spike's single calls, one engine function each (game thread), so a crash names its call:
-	std::string Unequip(std::uint32_t a_formID);          // Actor::UnequipObject on the first worn list of that item
+	std::string Unequip(std::uint32_t a_formID);          // the vtable's RemoveWornItem on the first worn list of that item
 	std::string Store(std::uint32_t a_formID, int a_slot); // RemoveItem of one piece into that loadout's container
 	std::string Take(int a_slot);                          // the container's items back to the player (not equipped)
-	std::string Equip(std::uint32_t a_formID);             // AddWornItem on a carried piece
+	std::string Equip(std::uint32_t a_formID);             // EquipObject (address library) on a carried piece
+	std::string Wear(std::uint32_t a_formID);              // the vtable's AddWornItem on a carried piece (the mod's own route)
 }
