@@ -1,4 +1,4 @@
-# Simple Loadout System for Oblivion Remastered
+# Simple Loadout System (Oblivion Remastered)
 
 Loadout buttons inside the game's inventory menu, just above the categories, for The Elder Scrolls IV: Oblivion
 Remastered - the [Skyrim Simple Loadout System for Controller](https://github.com/ApocryphaRealm/SimpleLoadoutSystemForController)

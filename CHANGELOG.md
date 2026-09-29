@@ -1,4 +1,4 @@
-# Changelog - Simple Loadout System for Oblivion Remastered
+# Changelog - Simple Loadout System (Oblivion Remastered)
 
 Newest first. Versions are issued by the version gate; a number here is one a build earned by working in game.
 

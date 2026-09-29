@@ -1,4 +1,4 @@
-Simple Loadout System for Oblivion Remastered
+Simple Loadout System (Oblivion Remastered)
 =============================================
 Version 1.0.0
 
