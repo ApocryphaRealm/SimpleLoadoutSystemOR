@@ -81,6 +81,7 @@ namespace
 		}
 		menus::SetListener(&OnMenu);
 		gamethread::SetFrameCallback(&OnFrame);
+		gamethread::SetPadRule(&bar::PadRule);   // D-pad Up from the list's top row hands the game's focus to the row
 		gamethread::Install();
 		WriteSelfCheck();
 	}

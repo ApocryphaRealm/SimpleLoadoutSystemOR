@@ -4,6 +4,8 @@
 #include "Settings.h"
 #include "Ue.h"
 
+#include <set>
+
 namespace bar
 {
 	namespace
@@ -20,8 +22,15 @@ namespace bar
 		constexpr const wchar_t* kLabelTemplate = L"/Game/UI/Modern/MenuLayer/Settings/Rebind/Gamepad/WBP_Modern_Settings_GamepadRebindWidget.WBP_Modern_Settings_GamepadRebindWidget_C:WidgetTree.RebindLabel";
 		constexpr const wchar_t* kTileClass = L"/Game/UI/Original/Prefabs/WBP_OriginalImageTile.WBP_OriginalImageTile_C";
 		constexpr const wchar_t* kTextClass = L"/Game/UI/Modern/Prefabs/WBP_AltarTextBlock.WBP_AltarTextBlock_C";
+		constexpr const wchar_t* kButtonClass = L"/Game/UI/Modern/Prefabs/Buttons/WBP_ModernPrefab_InvisibleButton.WBP_ModernPrefab_InvisibleButton_C";   // the category tabs' click surface - a VNavigableButton
+		// The game's own navigation (module VCommonUIEnhancedInputNavigation, read from the SDK dump 2026-09-29): every
+		// navigable widget implements IVEnhancedInputNavigable, the list is a VAltarNavigableListView, our buttons are
+		// VNavigableButtons, and the global subsystem's NavigateToWidget moves the focus between them. The list's
+		// BP_OnNavigateUp and the buttons' BP_OnNavigate* / OnFocus / BP_OnClicked events pass through ProcessEvent.
+		constexpr const wchar_t* kNavigableInterface = L"/Script/VCommonUIEnhancedInputNavigation.VEnhancedInputNavigable";
+		constexpr const wchar_t* kNavSubsystemClass = L"/Script/VCommonUIEnhancedInputNavigation.VUINavigationGlobalSubsystem";
 
-		constexpr double kBoxW = 168.0, kBoxH = 44.0, kGap = 10.0;   // Slate units; five boxes span the content box
+		constexpr double kBoxH = 44.0, kGap = 8.0;   // Slate units; the boxes share the content box's width
 
 		struct Entry
 		{
@@ -29,6 +38,7 @@ namespace bar
 			UE::UObject* overlay = nullptr;
 			UE::UObject* tile = nullptr;
 			UE::UObject* label = nullptr;
+			UE::UObject* button = nullptr;   // the mouse's click surface over the box
 		};
 
 		std::mutex   g_lock;
@@ -37,6 +47,8 @@ namespace bar
 		int          g_tries = 0;
 		UE::UObject* g_row = nullptr;          // our HorizontalBox, first in the content box
 		UE::UObject* g_contentBox = nullptr;   // inv_cont_verticalbox
+		UE::UObject* g_list = nullptr;         // the VModernListView inside the wrapper (its selected row)
+		UE::UObject* g_listWrapper = nullptr;  // WBP_OriginalMenu_InventoryListView_C - the navigable list the game focuses
 		std::vector<Entry> g_entries;
 		int          g_cursor = 0;
 		bool         g_focused = false;
@@ -253,6 +265,158 @@ namespace bar
 			return add.Get<UE::UObject*>("ReturnValue");
 		}
 
+		// The list's highlighted row: the list widget's selected item and its index (UListView's BP_GetSelectedItem /
+		// GetIndexForItem). -1 when the list has no selection, -2 when the calls are not there (then a HELD Up reaches
+		// the row instead).
+		int SelectedRow()
+		{
+			if (!g_list || !reflect::IsLive(g_list)) {
+				return -2;
+			}
+			ue::Call sel(g_list, L"BP_GetSelectedItem");
+			if (!sel) {
+				return -2;
+			}
+			sel.Run();
+			auto* item = sel.Get<UE::UObject*>("ReturnValue");
+			if (!item) {
+				return -1;
+			}
+			ue::Call idx(g_list, L"GetIndexForItem");
+			if (!idx) {
+				return -2;
+			}
+			idx.Set("Item", item);
+			idx.Run();
+			return idx.Get<std::int32_t>("ReturnValue");
+		}
+
+		void Choose();
+		void FocusFromMouse(int a_index);
+		void Focus(bool a_on);
+
+		// ---- the game's navigation ----------------------------------------------------------------------------
+		UE::UObject* NavSubsystem()
+		{
+			static UE::UObject* cached = nullptr;
+			if (!cached || !reflect::IsLive(cached)) {
+				cached = nullptr;
+				if (auto* cls = ue::Class(kNavSubsystemClass)) {
+					for (UE::UObject* o : reflect::Instances(cls)) {
+						cached = o;
+					}
+				}
+			}
+			return cached;
+		}
+
+		// the IVEnhancedInputNavigable pointer inside a_obj (UE5 FImplementedInterface: class, pointer offset, by-K2), for a
+		// TScriptInterface the subsystem can use; nullptr when the class does not implement it natively
+		void* NavigableInterface(UE::UObject* a_obj)
+		{
+			struct Implemented { UE::UClass* cls; std::int32_t offset; bool byK2; };
+			struct TArr { Implemented* data; std::int32_t num, max; };
+			static auto* iface = ue::Class(kNavigableInterface);
+			if (!a_obj || !iface) {
+				return nullptr;
+			}
+			for (UE::UStruct* s = a_obj->GetClass(); s; s = s->superStruct) {
+				auto* cls = static_cast<UE::UClass*>(s);
+				const auto& arr = *reinterpret_cast<const TArr*>(&cls->interfaces);
+				for (std::int32_t i = 0; arr.data && i < arr.num && i < 32; ++i) {
+					if (arr.data[i].cls == iface && arr.data[i].offset > 0) {
+						return reinterpret_cast<std::uint8_t*>(a_obj) + arr.data[i].offset;
+					}
+				}
+			}
+			return nullptr;
+		}
+
+		bool NavigateTo(UE::UObject* a_widget, const char* a_what)
+		{
+			auto* sub = NavSubsystem();
+			void* iface = NavigableInterface(a_widget);
+			if (!sub || !a_widget || !iface) {
+				logger::warn("bar: cannot navigate to {} (subsystem {:p}, widget {:p}, interface {:p})", a_what, static_cast<void*>(sub), static_cast<void*>(a_widget), iface);
+				return false;
+			}
+			struct ScriptInterface { UE::UObject* object; void* iface; };
+			ue::Call c(sub, L"NavigateToWidget");
+			c.Set("Widget", ScriptInterface{ a_widget, iface });
+			const bool ok = c.Run();
+			logger::info("bar: navigate to {} ({})", a_what, ok ? "asked" : "no NavigateToWidget");
+			return ok;
+		}
+
+		int ListElementIndex()
+		{
+			ue::Call c(g_listWrapper, L"GetCurrentElementIndex");
+			if (!c) {
+				return -2;
+			}
+			c.Run();
+			return c.Get<std::int32_t>("ReturnValue");
+		}
+
+		// the list's events: Up from its top row hands the focus to the row
+		void OnListEvent(UE::UObject* a_obj, UE::UFunction* a_fn, void*)
+		{
+			if (a_obj != g_listWrapper || !a_fn || g_entries.empty()) {
+				return;
+			}
+			const std::string n = pe::FunctionName(a_fn);
+			static std::set<std::string> seen;
+			if (seen.insert(n).second) {
+				logger::info("bar: list fired {}", n);
+			}
+			if (n == "BP_OnNavigateUp") {
+				const int row = ListElementIndex();
+				logger::info("bar: list navigate-up at element {}", row);
+				if (row <= 0) {
+					NavigateTo(g_entries[static_cast<std::size_t>(std::clamp(g_cursor, 0, static_cast<int>(g_entries.size()) - 1))].button, "the loadout row");
+				}
+			}
+		}
+
+		// ProcessEvent on the invisible-button prefab: which of our buttons it is, and what fired on it. The click is
+		// whichever event name the prefab uses (learned from the log on the first click; every name fires once here).
+		void OnButtonEvent(UE::UObject* a_obj, UE::UFunction* a_fn, void*)
+		{
+			int index = -1;
+			for (int i = 0; i < static_cast<int>(g_entries.size()); ++i) {
+				if (g_entries[static_cast<std::size_t>(i)].button == a_obj) {
+					index = i;
+				}
+			}
+			if (index < 0 || !a_fn) {
+				return;
+			}
+			const std::string n = pe::FunctionName(a_fn);
+			static std::set<std::string> seen;
+			if (seen.insert(n).second) {
+				logger::info("bar: button {} fired {}", index + 1, n);
+			}
+			if (n == "BP_OnClicked") {
+				FocusFromMouse(index);
+				Choose();
+			} else if (n == "OnFocus" || n == "BP_OnHovered" || n == "OnHovered" || n == "BP_OnFocused") {
+				FocusFromMouse(index);
+			} else if (n == "OnUnfocus" || n == "BP_OnUnhovered" || n == "BP_OnUnfocused") {
+				if (g_cursor == index) {
+					Focus(false);
+				}
+			} else if (n == "BP_OnNavigateLeft" || n == "BP_OnNavigateRight") {
+				const int count = static_cast<int>(g_entries.size());
+				const int next = (index + (n == "BP_OnNavigateLeft" ? -1 : 1) + count) % count;
+				NavigateTo(g_entries[static_cast<std::size_t>(next)].button, n == "BP_OnNavigateLeft" ? "the box to the left" : "the box to the right");
+			} else if (n == "BP_OnNavigateDown" || n == "BP_OnNavigateUp") {
+				NavigateTo(g_listWrapper, "the item list");
+				ue::Call top(g_listWrapper, L"NavigateToIndex");
+				top.Set("NewIndex", std::int32_t(0));
+				top.Run();
+			}
+		}
+
 		void Refresh()
 		{
 			const int active = loadouts::Active();
@@ -326,9 +490,8 @@ namespace bar
 				CopyProperty(e.label, labelTemplate, "FontSizeChannel");
 				SetLabel(e, settings::Name(i));
 				// the box: a SizeBox of the row's size, an Overlay in it, the tile filling it and the label centred
-				const float w = static_cast<float>(kBoxW), h = static_cast<float>(kBoxH);
-				CallFirst(e.sizeBox, L"SetWidthOverride", &w, sizeof(w));
-				CallFirst(e.sizeBox, L"SetHeightOverride", &h, sizeof(h));
+				const float h = static_cast<float>(kBoxH);
+				CallFirst(e.sizeBox, L"SetHeightOverride", &h, sizeof(h));   // the width comes from the row: every box an equal share
 				if (auto* ts = AddTo(e.overlay, L"AddChildToOverlay", e.tile)) {
 					const std::uint8_t fill = 0;   // HAlign_Fill / VAlign_Fill
 					CallFirst(ts, L"SetHorizontalAlignment", &fill, 1);
@@ -339,6 +502,25 @@ namespace bar
 					CallFirst(ls, L"SetHorizontalAlignment", &centre, 1);
 					CallFirst(ls, L"SetVerticalAlignment", &centre, 1);
 				}
+				e.button = Create(kButtonClass);
+				if (e.button) {
+					// the game's navigation moves focus within a LAYER (a gameplay tag on every navigable widget): the button
+					// takes the list's, so the subsystem treats them as one layer
+					if (auto* listWrapper = FindByClass(contentBox, "InventoryListView", 4)) {
+						CopyProperty(e.button, listWrapper, "LayerTag");
+					}
+					if (auto* bs = AddTo(e.overlay, L"AddChildToOverlay", e.button)) {
+						const std::uint8_t fill = 0;
+						CallFirst(bs, L"SetHorizontalAlignment", &fill, 1);
+						CallFirst(bs, L"SetVerticalAlignment", &fill, 1);
+					}
+					static bool watched = false;
+					if (!watched) {
+						watched = pe::Watch(e.button->GetClass(), &OnButtonEvent);
+					}
+				} else if (i == 0) {
+					logger::warn("bar: the invisible-button prefab could not be made - no mouse on the boxes");
+				}
 				{
 					ue::Call c(e.sizeBox, L"SetContent");
 					c.Set("Content", e.overlay);
@@ -347,6 +529,8 @@ namespace bar
 				if (auto* rs = AddTo(row, L"AddChildToHorizontalBox", e.sizeBox)) {
 					const Margin m{ i == 0 ? 0.0f : static_cast<float>(kGap), 0.0f, 0.0f, 0.0f };
 					CallFirst(rs, L"SetPadding", &m, sizeof(m));
+					const ChildSize fill{ 1.0f, 1 };   // ESlateSizeRule::Fill - the boxes share the row's width equally
+					CallFirst(rs, L"SetSize", &fill, sizeof(fill));
 				}
 				entries.push_back(e);
 			}
@@ -355,6 +539,15 @@ namespace bar
 			}
 			// the row goes FIRST in the content box: its children come off and go back on behind it, each with the
 			// slot settings it had
+			g_listWrapper = FindByClass(contentBox, "InventoryListView", 4);
+			g_list = FindByClass(TreeRoot(g_listWrapper), "ListView", 3);
+			if (g_listWrapper) {
+				static bool watched = false;
+				if (!watched) {
+					watched = pe::Watch(g_listWrapper->GetClass(), &OnListEvent);
+				}
+			}
+			const int selectedBefore = SelectedRow();
 			std::vector<std::pair<UE::UObject*, SlotSettings>> old;
 			for (UE::UObject* c : Children(contentBox)) {
 				old.emplace_back(c, ReadSlot(Prop(c, "Slot")));
@@ -366,7 +559,7 @@ namespace bar
 			if (auto* rslot = AddTo(contentBox, L"AddChildToVerticalBox", row)) {
 				SlotSettings s;
 				s.padding = Margin{ 0.0f, 4.0f, 0.0f, 10.0f };
-				s.halign = 2;   // centred in the content box
+				s.halign = 0;   // HAlign_Fill: the row is exactly as wide as the content box, never wider
 				ApplySlot(rslot, s);
 			} else {
 				Problem("AddChildToVerticalBox refused the row");
@@ -374,13 +567,23 @@ namespace bar
 			for (auto& [c, s] : old) {
 				ApplySlot(AddTo(contentBox, L"AddChildToVerticalBox", c), s);
 			}
+			// The list came off the box and went back on, which loses the game's navigation registration for it (the
+			// D-pad stopped moving the list, 2026-09-29): the list's own NavigateToItemIndex re-establishes it on the
+			// row it had, and its focus comes back.
+			g_list = FindByClass(TreeRoot(FindByClass(contentBox, "InventoryListView", 4)), "ListView", 3);   // the VModernListView inside the wrapper
+			// Taking the list off the box DEACTIVATED it (a CommonUI activatable widget), which is what killed the D-pad
+			// until the mouse re-activated it (2026-09-29): its own ActivateWidget brings its input and focus back.
+			{
+				ue::Call act(g_listWrapper, L"ActivateWidget");
+				logger::info("bar: list {:p} was at row {}; re-activated ({})", static_cast<void*>(g_listWrapper), selectedBefore, act.Run() ? "ActivateWidget called" : "no ActivateWidget");
+			}
 			g_row = row;
 			g_contentBox = contentBox;
 			g_entries = std::move(entries);
 			g_cursor = std::clamp(loadouts::Active(), 0, static_cast<int>(g_entries.size()) - 1);
 			g_focused = false;
 			Refresh();
-			const std::string layout = std::format("{} boxes ({}x{}) first in the content box, {} children re-added", g_entries.size(), kBoxW, kBoxH, old.size());
+			const std::string layout = std::format("{} boxes (height {}) filling the row, first in the content box, {} children re-added", g_entries.size(), kBoxH, old.size());
 			logger::info("bar: built - {}", layout);
 			std::scoped_lock l(g_lock);
 			g_snap.built = true;
@@ -399,12 +602,54 @@ namespace bar
 			}
 			g_row = nullptr;
 			g_contentBox = nullptr;
+			g_list = nullptr;
+			g_listWrapper = nullptr;
 			g_entries.clear();
 			g_focused = false;
 			std::scoped_lock l(g_lock);
 			g_snap.built = false;
 			g_snap.buttons = 0;
 			g_snap.focused = false;
+		}
+
+		WORD  g_swallow = 0;         // bits the game must not see until they are released
+		std::chrono::steady_clock::time_point g_upHeldSince{};
+		bool  g_upHeld = false;
+
+		void Focus(bool a_on)
+		{
+			g_focused = a_on;
+			Refresh();
+			std::scoped_lock l(g_lock);
+			g_snap.focused = a_on;
+			g_snap.cursor = g_cursor;
+		}
+
+		void FocusFromMouse(int a_index)
+		{
+			g_cursor = std::clamp(a_index, 0, std::max(0, static_cast<int>(g_entries.size()) - 1));
+			Focus(true);
+		}
+
+		void Move(int a_delta)
+		{
+			const int n = static_cast<int>(g_entries.size());
+			if (n <= 0) {
+				return;
+			}
+			g_cursor = (g_cursor + a_delta + n) % n;
+			Refresh();
+			std::scoped_lock l(g_lock);
+			g_snap.cursor = g_cursor;
+		}
+
+		void Choose()
+		{
+			const int target = g_cursor == loadouts::Active() ? -1 : g_cursor;
+			// The switch itself stays DISARMED until the engine's equip route is proven (Actor::UnequipObject took the
+			// game down on 2026-09-29): the press is logged and the highlight moves, nothing moves in the inventory.
+			logger::info("bar: A on {} -> would {} (switch disarmed until the equip route is proven)", settings::Name(g_cursor), target < 0 ? "deselect" : "select");
+			Refresh();
 		}
 	}
 
@@ -438,9 +683,70 @@ namespace bar
 		}
 	}
 
+
+	bool PadRule(XINPUT_GAMEPAD& a_pad, WORD a_pressed, WORD a_released)
+	{
+		using Clock = std::chrono::steady_clock;
+		const WORD before = a_pad.wButtons;
+		g_swallow &= ~a_released;
+		if (!g_snap.built || g_entries.empty()) {
+			g_upHeld = false;
+			a_pad.wButtons &= ~g_swallow;
+			return a_pad.wButtons != before;
+		}
+		constexpr WORD kNav = XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B;
+		if (!g_focused) {
+			if (a_pressed & XINPUT_GAMEPAD_DPAD_UP) {
+				const int row = SelectedRow();
+				logger::info("bar: D-pad Up with the list's selected row {} (list {:p})", row, static_cast<void*>(g_list));
+				if (row == 0 || row == -1) {
+					g_swallow |= XINPUT_GAMEPAD_DPAD_UP;   // the game never steps onto anything above the list
+					const int i = std::clamp(g_cursor, 0, static_cast<int>(g_entries.size()) - 1);
+					NavigateTo(g_entries[static_cast<std::size_t>(i)].button, "the loadout row");   // the game's focus lands on the button: A clicks it, its sounds play
+					Focus(true);
+				} else if (row == -2) {
+					g_upHeld = true;   // no index to read: a hold reaches the row
+					g_upHeldSince = Clock::now();
+				}
+			}
+			if (g_upHeld && (a_pad.wButtons & XINPUT_GAMEPAD_DPAD_UP) && Clock::now() - g_upHeldSince >= 250ms) {
+				g_upHeld = false;
+				g_swallow |= XINPUT_GAMEPAD_DPAD_UP;
+				Focus(true);
+			}
+			if (a_released & XINPUT_GAMEPAD_DPAD_UP) {
+				g_upHeld = false;
+			}
+		} else {
+			const int count = static_cast<int>(g_entries.size());
+			if (a_pressed & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) {
+				Move((a_pressed & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : +1);
+				NavigateTo(g_entries[static_cast<std::size_t>(std::clamp(g_cursor, 0, count - 1))].button, "the next box");
+			}
+			if (a_pressed & (XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_B)) {
+				Focus(false);
+				NavigateTo(g_listWrapper, "the item list");
+				// back to the TOP of the list, not the element it remembers (the owner, 2026-09-29: it jumped to the
+				// Steel Claymore instead of starting at the top)
+				ue::Call top(g_listWrapper, L"NavigateToIndex");
+				top.Set("NewIndex", std::int32_t(0));
+				top.Run();
+			}
+			// A is the game's: the focused button's own click fires BP_OnClicked
+			g_swallow |= static_cast<WORD>(a_pad.wButtons & (kNav & ~XINPUT_GAMEPAD_A));
+		}
+		a_pad.wButtons &= ~g_swallow;
+		return a_pad.wButtons != before;
+	}
+
 	Snapshot GetSnapshot()
 	{
 		std::scoped_lock l(g_lock);
 		return g_snap;
+	}
+
+	int ListRow()
+	{
+		return SelectedRow();
 	}
 }

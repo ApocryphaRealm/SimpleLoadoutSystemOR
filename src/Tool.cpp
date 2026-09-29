@@ -44,7 +44,7 @@ namespace tool
 			j["queued_steps"] = gamethread::Queued();
 			j["loadout_count"] = settings::Get().count;
 			const auto b = bar::GetSnapshot();
-			j["bar"] = { { "built", b.built }, { "buttons", b.buttons }, { "layout", b.layout }, { "problem", b.problem } };
+			j["bar"] = { { "built", b.built }, { "buttons", b.buttons }, { "cursor", b.cursor }, { "focused", b.focused }, { "list_row", bar::ListRow() }, { "layout", b.layout }, { "problem", b.problem } };
 			return j;
 		}
 
