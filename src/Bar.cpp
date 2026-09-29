@@ -1,6 +1,7 @@
 #include "Bar.h"
 
 #include "Loadouts.h"
+#include "Menus.h"
 #include "Settings.h"
 #include "Ue.h"
 
@@ -49,6 +50,7 @@ namespace bar
 		UE::UObject* g_contentBox = nullptr;   // inv_cont_verticalbox
 		UE::UObject* g_list = nullptr;         // the VModernListView inside the wrapper (its selected row)
 		UE::UObject* g_listWrapper = nullptr;  // WBP_OriginalMenu_InventoryListView_C - the navigable list the game focuses
+		UE::UObject* g_content = nullptr;      // inv_mainContent - holds the Slate focus while the row is active
 		std::vector<Entry> g_entries;
 		int          g_cursor = 0;
 		bool         g_focused = false;
@@ -165,16 +167,30 @@ namespace bar
 		// effect for scrolling the boxes).
 		void PlayUiSound(const wchar_t* a_eventPath)
 		{
+			// posted with NO actor: a UI sound is 2D, on Wwise's default object (on the player controller it was
+			// spatialised at the controller's location and inaudible, 2026-09-29)
 			auto* ev = ue::Find(a_eventPath);
-			auto* pc = PlayerController();
-			if (!ev || !pc) {
+			static auto* akClass = ue::Class(L"/Script/AkAudio.AkGameplayStatics");
+			auto* ak = akClass ? akClass->GetDefaultObject(false) : nullptr;
+			if (!ev || !ak) {
+				static bool said = false;
+				if (!said) {
+					said = true;
+					logger::warn("bar: no UI sound - event {:p}, AkGameplayStatics {:p}", static_cast<void*>(ev), static_cast<void*>(ak));
+				}
 				return;
 			}
-			ue::Call c(ev, L"PostOnActor");
-			c.Set("Actor", pc);
+			ue::Call c(ak, L"PostEvent");
+			c.Set("AkEvent", ev);
+			c.Set("Actor", static_cast<UE::UObject*>(nullptr));
 			c.Set("CallbackMask", std::int32_t(0));
-			c.Set("bStopWhenAttachedObjectDestroyed", false);
-			c.Run();
+			c.Set("bStopWhenAttachedToDestroyed", false);
+			const bool ok = c.Run();
+			static bool said = false;
+			if (!said) {
+				said = true;
+				logger::info("bar: UI sound posted with no actor ({}), playing id {}", ok ? "AkGameplayStatics::PostEvent" : "no PostEvent", c.Get<std::int32_t>("ReturnValue"));
+			}
 		}
 		constexpr const wchar_t* kSoundHover = L"/Game/WwiseAudio/Interface/Global/Redesign/ui_glb_hover.ui_glb_hover";
 		constexpr const wchar_t* kSoundSelect = L"/Game/WwiseAudio/Interface/Global/Redesign/ui_glb_select.ui_glb_select";
@@ -277,6 +293,22 @@ namespace bar
 		UE::UObject* TreeRoot(UE::UObject* a_userWidget)
 		{
 			return Prop(Prop(a_userWidget, "WidgetTree"), "RootWidget");
+		}
+
+		// the main part that belongs to the inventory widget the game has ACTIVE (its tree), else the last instance
+		UE::UObject* LivePart()
+		{
+			if (auto* menu = menus::InventoryWidget()) {
+				if (auto* part = FindByClass(TreeRoot(menu), "InventoryMainPart", 6)) {
+					return part;
+				}
+			}
+			auto* cls = ue::Class(kMainPartPath);
+			UE::UObject* last = nullptr;
+			for (UE::UObject* o : cls ? reflect::Instances(cls) : std::vector<UE::UObject*>{}) {
+				last = o;
+			}
+			return last;
 		}
 
 		struct Margin { float left, top, right, bottom; };
@@ -415,6 +447,24 @@ namespace bar
 			return c.Get<std::int32_t>("ReturnValue");
 		}
 
+		// the entries' events around a hand-off (diagnosis of the row that lights up when the focus leaves the list)
+		std::chrono::steady_clock::time_point g_handOffAt{};
+		void OnEntryEvent(UE::UObject* a_obj, UE::UFunction* a_fn, void* a_params)
+		{
+			if (!a_obj || !a_fn || std::chrono::steady_clock::now() - g_handOffAt > 1500ms) {
+				return;
+			}
+			const std::string n = pe::FunctionName(a_fn);
+			if (n == "OnMouseMove" || n == "OnPaint" || n == "Tick" || n == "OnAnalogValueChanged") {
+				return;
+			}
+			std::string arg;
+			if (n == "BP_OnItemSelectionChanged" || n == "BP_OnItemExpansionChanged" || n == "SetIsFocused" || n == "SetIsSelected") {
+				arg = a_params && *static_cast<std::uint8_t*>(a_params) ? " true" : " false";
+			}
+			logger::info("bar: entry {:p} fired {}{}", static_cast<void*>(a_obj), n, arg);
+		}
+
 		// the list's events: Up from its top row hands the focus to the row
 		void OnListEvent(UE::UObject* a_obj, UE::UFunction* a_fn, void*)
 		{
@@ -485,11 +535,10 @@ namespace bar
 
 		void Build()
 		{
+			// the main part UNDER THE ACTIVE inventory widget - a second instance exists (the container menu's, or one the
+			// game keeps warm) and the row built into the last instance never showed (2026-09-29)
 			auto* mainPartClass = ue::Class(kMainPartPath);
-			UE::UObject* mainPart = nullptr;
-			for (UE::UObject* o : mainPartClass ? reflect::Instances(mainPartClass) : std::vector<UE::UObject*>{}) {
-				mainPart = o;
-			}
+			UE::UObject* mainPart = LivePart();
 			if (!mainPart) {
 				Problem("the inventory's main part is not there yet");
 				return;
@@ -561,6 +610,15 @@ namespace bar
 				}
 				e.button = Create(kButtonClass);
 				if (e.button) {
+					// the prefab ships bIsFocusable = false (so do the game's tabs): without this, Slate cannot keep the focus
+					// on the button and drops it onto a list entry, which lit the Steel Claymore / Steel Arrow (2026-09-29)
+					{
+						ue::Call f(e.button, L"SetIsFocusable");
+						f.Set("InIsFocusable", true);
+						if (!f.Run() && i == 0) {
+							logger::warn("bar: the button has no SetIsFocusable - the focus may not stay on the row");
+						}
+					}
 					// the game's navigation moves focus within a LAYER (a gameplay tag on every navigable widget): the button
 					// takes the list's, so the subsystem treats them as one layer
 					if (auto* listWrapper = FindByClass(contentBox, "InventoryListView", 4)) {
@@ -632,15 +690,31 @@ namespace bar
 			// until the mouse re-activated it (2026-09-29): its own ActivateWidget brings its input and focus back.
 			{
 				ue::Call act(g_listWrapper, L"ActivateWidget");
-				logger::info("bar: list {:p} was at row {}; re-activated ({})", static_cast<void*>(g_listWrapper), selectedBefore, act.Run() ? "ActivateWidget called" : "no ActivateWidget");
+				const bool activated = act.Run();
+				// its current element is stale until it is navigated once (the first hand-off lit the element it
+				// remembered - the Steel Claymore - and every later one was right, 2026-09-29): to its top row now
+				ue::Call top(g_listWrapper, L"NavigateToIndex");
+				top.Set("NewIndex", std::int32_t(0));
+				const bool navigated = top.Run();
+				// no wrap-around: with looping on, "up" from the top row lands on the LAST element (the Steel Claymore lit
+				// as the focus left the list on the first hand-off, 2026-09-29)
+				if (auto* loop = reflect::At<bool>(g_listWrapper, reflect::Offset(g_listWrapper->GetClass(), "bDoesAllowLoopingNavigation"))) {
+					logger::info("bar: list looping navigation was {} - off", *loop ? "on" : "off");
+					*loop = false;
+				}
+				logger::info("bar: list {:p} was at row {}; re-activated ({}), current element set to the top row ({})", static_cast<void*>(g_listWrapper), selectedBefore,
+					activated ? "ActivateWidget called" : "no ActivateWidget", navigated ? "NavigateToIndex(0)" : "no NavigateToIndex");
 			}
 			g_row = row;
 			g_contentBox = contentBox;
+			g_content = content;
 			g_entries = std::move(entries);
 			g_cursor = std::clamp(loadouts::Active(), 0, static_cast<int>(g_entries.size()) - 1);
 			g_focused = false;
 			Refresh();
-			const std::string layout = std::format("{} boxes (height {}) filling the row, first in the content box, {} children re-added", g_entries.size(), kBoxH, old.size());
+			const std::string layout = std::format("{} boxes (height {}) filling the row, first in the content box, {} children re-added; main part {} ({} instance(s)), content {}, box {}, list wrapper {}, inner list {}, row parent {}",
+				g_entries.size(), kBoxH, old.size(), ClassName(mainPart), mainPartClass ? reflect::Instances(mainPartClass).size() : 0, ClassName(content), ClassName(contentBox),
+				ClassName(g_listWrapper), ClassName(g_list), ClassName(Prop(Prop(row, "Slot"), "Parent")));
 			logger::info("bar: built - {}", layout);
 			std::scoped_lock l(g_lock);
 			g_snap.built = true;
@@ -661,6 +735,7 @@ namespace bar
 			g_contentBox = nullptr;
 			g_list = nullptr;
 			g_listWrapper = nullptr;
+			g_content = nullptr;
 			g_entries.clear();
 			g_focused = false;
 			std::scoped_lock l(g_lock);
@@ -724,6 +799,24 @@ namespace bar
 
 	void Tick()
 	{
+		// The game recreates the inventory's content widget on some refreshes (with Weightless recounting weights at the
+		// opening, the row built into a widget that was then thrown away and never showed, 2026-09-29): when the content
+		// widget on screen is no longer the one the row was built into, the row is built again.
+		if (!g_pending && g_snap.built) {
+			UE::UObject* content = Prop(LivePart(), "inv_mainContent");
+			if (content && (content != g_content || !g_row || !reflect::IsLive(g_row))) {
+				logger::info("bar: the content widget changed under the row ({:p} -> {:p}) - building again", static_cast<void*>(g_content), static_cast<void*>(content));
+				g_row = nullptr;
+				g_entries.clear();
+				g_focused = false;
+				{
+					std::scoped_lock l(g_lock);
+					g_snap.built = false;
+				}
+				g_pending = true;
+				g_tries = 0;
+			}
+		}
 		if (!g_pending) {
 			return;
 		}
@@ -760,13 +853,23 @@ namespace bar
 				if (row == 0 || row == -1) {
 					g_swallow |= XINPUT_GAMEPAD_DPAD_UP;   // the game never steps onto anything above the list
 					const int i = std::clamp(g_cursor, 0, static_cast<int>(g_entries.size()) - 1);
-					NavigateTo(g_entries[static_cast<std::size_t>(i)].button, "the loadout row");   // the game's focus lands on the button: A clicks it
+					g_handOffAt = Clock::now();
+					if (auto* entryClass = ue::Class(L"/Game/UI/Original/GameMenuLayer/Inventory/MainPart/WBP_OriginalMenu_InventoryEntry.WBP_OriginalMenu_InventoryEntry_C")) {
+						static bool watched = false;
+						if (!watched) {
+							watched = pe::Watch(entryClass, &OnEntryEvent);
+						}
+					}
+					// The list goes to its top row, then the game's own navigation moves the focus to the (focusable) button:
+					// its move sound is the game's and A presses the button (the 07:53 build, the owner: sound works, the
+					// highlight is right on every hand-off but the first).
+					{
+						ue::Call top(g_listWrapper, L"NavigateToIndex");
+						top.Set("NewIndex", std::int32_t(0));
+						top.Run();
+					}
+					NavigateTo(g_entries[static_cast<std::size_t>(i)].button, "the loadout row");
 					Focus(true);
-					PlayUiSound(kSoundHover);
-					// the list keeps its SELECTION highlighted after its focus leaves (the owner, 2026-09-29: the Steel
-					// Claymore stayed lit while the row had the focus) - cleared, so only the focused box is lit
-					ue::Call clear(g_listWrapper, L"ClearSelection");
-					clear.Run();
 				} else if (row == -2) {
 					g_upHeld = true;   // no index to read: a hold reaches the row
 					g_upHeldSince = Clock::now();
@@ -785,7 +888,6 @@ namespace bar
 			if (a_pressed & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) {
 				Move((a_pressed & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : +1);
 				NavigateTo(g_entries[static_cast<std::size_t>(std::clamp(g_cursor, 0, count - 1))].button, "the next box");
-				PlayUiSound(kSoundHover);
 			}
 			if (a_pressed & (XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_B)) {
 				Focus(false);
@@ -796,8 +898,10 @@ namespace bar
 				top.Set("NewIndex", std::int32_t(0));
 				top.Run();
 			}
-			// A is the game's: the focused button's own click fires BP_OnClicked
-			g_swallow |= static_cast<WORD>(a_pad.wButtons & (kNav & ~XINPUT_GAMEPAD_A));
+			if (a_pressed & XINPUT_GAMEPAD_A) {
+				Choose();   // the button has no Slate focus, so A is ours while the row is active
+			}
+			g_swallow |= static_cast<WORD>(a_pad.wButtons & kNav);
 		}
 		a_pad.wButtons &= ~g_swallow;
 		return a_pad.wButtons != before;
