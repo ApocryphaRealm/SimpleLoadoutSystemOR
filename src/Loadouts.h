@@ -32,4 +32,10 @@ namespace loadouts
 		bool          extra;    // the piece has its own extra data (health, charge, a name)
 	};
 	std::vector<WornPiece> Worn();   // game thread
+
+	// The spike's single calls, one engine function each (game thread), so a crash names its call:
+	std::string Unequip(std::uint32_t a_formID);          // Actor::UnequipObject on the first worn list of that item
+	std::string Store(std::uint32_t a_formID, int a_slot); // RemoveItem of one piece into that loadout's container
+	std::string Take(int a_slot);                          // the container's items back to the player (not equipped)
+	std::string Equip(std::uint32_t a_formID);             // AddWornItem on a carried piece
 }

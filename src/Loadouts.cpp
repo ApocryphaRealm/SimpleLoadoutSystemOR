@@ -7,11 +7,11 @@ namespace loadouts
 {
 	namespace
 	{
-		// build-esp.py: SLSOR_Storage01..10 are REFR 0x801 + slot of the vanilla chest ChestHouseTreasuryMiddle02
-		// (Oblivion.esm 0x000A496D, DATA flags 0 - never respawns); SLSOR_ActiveLoadout is GLOB 0x800.
-		constexpr std::uint32_t kChestBase = 0x000A496D;
+		// build-esp.py: SLSOR_Storage01..10 are REFR 0x802 + slot (0x801 is the cell) of the vanilla empty chest ChestClutterLower01Empty
+		// (Oblivion.esm 0x000086C1, no items, DATA flags 0 - never respawns); SLSOR_ActiveLoadout is GLOB 0x800.
+		constexpr std::uint32_t kChestBase = 0x000086C1;
 		constexpr std::uint32_t kGlobalObject = 0x800;
-		constexpr std::uint32_t kFirstStorageObject = 0x801;
+		constexpr std::uint32_t kFirstStorageObject = 0x802;
 
 		std::array<RE::TESObjectREFR*, settings::kMaxLoadouts> g_storage{};
 		RE::TESGlobal*    g_active = nullptr;
@@ -123,7 +123,7 @@ namespace loadouts
 					if (w.quest && storage) {
 						++a_questKept;
 					}
-					a_player->RemoveWornItem(w.item->object, w.count, w.extra, w.left, true);
+					a_player->UnequipObject(w.item->object, w.count, w.extra, true, true);   // the address-library function, not the vtable slot
 					logger::debug("unequip: {} x{} (stays in the inventory{})", name, w.count, w.quest ? ", quest item" : "");
 				}
 			}
@@ -193,7 +193,8 @@ namespace loadouts
 						}
 					}
 				}
-				const bool ok = a_player->AddWornItem(p.object, p.count, extra, true);
+				a_player->EquipObject(p.object, p.count, extra, true, true);   // the address-library function, not the vtable slot
+				const bool ok = true;
 				logger::debug("equip: {} x{}{} -> {}", NameOf(p.object), p.count, extra ? " (own data)" : "", ok ? "worn" : "REFUSED");
 				restored += ok ? 1 : 0;
 			}
@@ -224,46 +225,66 @@ namespace loadouts
 				questKept ? std::format(", {} quest item(s) kept in the inventory", questKept) : "");
 			g_busy = false;
 		}
-
-		// Our records by their on-disk object index: the plugin's runtime load index is whatever Plugins.txt makes it,
-		// so every index is tried until the reference with our base object turns up.
-		template <class T>
-		T* Find(std::uint32_t a_object, std::uint8_t& a_index)
-		{
-			if (auto* f = RE::TESForm::LookupByID<T>((static_cast<std::uint32_t>(a_index) << 24) | a_object); f && a_index != 0) {
-				return f;
-			}
-			for (std::uint32_t i = 1; i < 0xFF; ++i) {
-				auto* f = RE::TESForm::LookupByID<T>((i << 24) | a_object);
-				if (!f) {
-					continue;
-				}
-				if constexpr (std::is_same_v<T, RE::TESObjectREFR>) {
-					if (!f->data.objectReference || f->data.objectReference->GetFormID() != kChestBase) {
-						continue;
-					}
-				} else {
-					auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>((i << 24) | kFirstStorageObject);
-					if (!ref || !ref->data.objectReference || ref->data.objectReference->GetFormID() != kChestBase) {
-						continue;
-					}
-				}
-				a_index = static_cast<std::uint8_t>(i);
-				return f;
-			}
-			return nullptr;
-		}
 	}
 
 	void Init()
 	{
-		std::uint8_t index = 0;
-		g_found = 0;
-		for (int i = 0; i < settings::kMaxLoadouts; ++i) {
-			g_storage[static_cast<std::size_t>(i)] = Find<RE::TESObjectREFR>(kFirstStorageObject + static_cast<std::uint32_t>(i), index);
-			g_found += g_storage[static_cast<std::size_t>(i)] ? 1 : 0;
+		// What the game actually loaded: the plugin must be in the game's Plugins.txt AND physically in its Data folder
+		// (the remaster's loader reads ESPs past MO2's virtual mapping, 2026-09-29 - Root Builder copies it in). The
+		// load index comes from the game's own file list.
+		int index = -1;
+		if (auto* dh = RE::TESDataHandler::GetSingleton()) {
+			std::string files;
+			for (RE::TESFile* f : dh->listFiles) {
+				if (!f) {
+					continue;
+				}
+				const std::string name = std::filesystem::path(f->filename).filename().string();
+				files += std::format("{}{} (0x{:02X})", files.empty() ? "" : ", ", name, f->GetCompileIndex());
+				if (_stricmp(name.c_str(), "SimpleLoadoutSystem.esp") == 0) {
+					index = f->GetCompileIndex();
+				}
+			}
+			logger::info("plugins loaded by the game: {}", files);
 		}
-		g_active = Find<RE::TESGlobal>(kGlobalObject, index);
+		if (index < 0) {
+			logger::error("SimpleLoadoutSystem.esp is NOT in the game's plugin list - the storage cannot exist");
+		}
+		g_found = 0;
+		g_active = nullptr;
+		for (std::uint32_t object = kGlobalObject; index >= 0 && object <= kFirstStorageObject + settings::kMaxLoadouts - 1; ++object) {
+			const std::uint32_t id = (static_cast<std::uint32_t>(index) << 24) | object;
+			auto* form = RE::TESForm::LookupByID(id);
+			logger::debug("form 0x{:08X}: {}{}", id, form ? std::format("type {}", static_cast<int>(form->GetFormType())) : "not found",
+				form && form->GetFormType() == RE::FormType::Reference ? std::format(", base {}", NameOf(static_cast<RE::TESObjectREFR*>(form)->data.objectReference)) : "");
+			if (!form) {
+				continue;
+			}
+			if (object == kGlobalObject && form->GetFormType() == RE::FormType::Global) {
+				g_active = static_cast<RE::TESGlobal*>(form);
+			} else if (object >= kFirstStorageObject && form->GetFormType() == RE::FormType::Reference) {
+				g_storage[object - kFirstStorageObject] = static_cast<RE::TESObjectREFR*>(form);
+				++g_found;
+			}
+		}
+		// By EditorID as well, in case the runtime IDs are not index<<24 | object in the remaster
+		if (!g_active) {
+			auto* byName = RE::TESForm::LookupByEditorID("SLSOR_ActiveLoadout");
+			logger::debug("by EditorID SLSOR_ActiveLoadout: {}", byName ? std::format("0x{:08X} type {}", byName->GetFormID(), static_cast<int>(byName->GetFormType())) : "not found");
+			if (byName && byName->GetFormType() == RE::FormType::Global) {
+				g_active = static_cast<RE::TESGlobal*>(byName);
+			}
+		}
+		for (int i = 0; i < settings::kMaxLoadouts && !g_storage[static_cast<std::size_t>(i)]; ++i) {
+			auto* byName = RE::TESForm::LookupByEditorID(std::format("SLSOR_Storage{:02d}", i + 1));
+			if (i == 0) {
+				logger::debug("by EditorID SLSOR_Storage01: {}", byName ? std::format("0x{:08X} type {}", byName->GetFormID(), static_cast<int>(byName->GetFormType())) : "not found");
+			}
+			if (byName && byName->GetFormType() == RE::FormType::Reference) {
+				g_storage[static_cast<std::size_t>(i)] = static_cast<RE::TESObjectREFR*>(byName);
+				++g_found;
+			}
+		}
 		g_storageNote = g_found == settings::kMaxLoadouts && g_active
 		                    ? std::format("{} containers and the global in SimpleLoadoutSystem.esp (load index 0x{:02X})", g_found, index)
 		                    : std::format("only {} of {} containers, global {} - is SimpleLoadoutSystem.esp enabled?", g_found, settings::kMaxLoadouts, g_active ? "found" : "MISSING");
@@ -319,6 +340,103 @@ namespace loadouts
 			out.push_back({ w.item->object->GetFormID(), NameOf(w.item->object), w.count, w.left, w.quest, HasOwnData(w.extra) });
 		}
 		return out;
+	}
+
+	namespace
+	{
+		RE::ItemChange* Carried(RE::TESObjectREFR* a_ref, std::uint32_t a_formID)
+		{
+			auto* items = Items(a_ref);
+			if (!items) {
+				return nullptr;
+			}
+			for (RE::ItemChange* item : *items) {
+				if (item && item->object && item->object->GetFormID() == a_formID && item->count > 0) {
+					return item;
+				}
+			}
+			return nullptr;
+		}
+
+		RE::ExtraDataList* FirstList(RE::ItemChange* a_item, bool a_worn)
+		{
+			if (!a_item || !a_item->extraData) {
+				return nullptr;
+			}
+			for (RE::ExtraDataList* xl : *a_item->extraData) {
+				bool left = false;
+				if (xl && IsWorn(xl, left) == a_worn) {
+					return xl;
+				}
+			}
+			return nullptr;
+		}
+	}
+
+	std::string Unequip(std::uint32_t a_formID)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* item = player ? Carried(player, a_formID) : nullptr;
+		if (!item) {
+			return "not carried";
+		}
+		auto* xl = FirstList(item, true);
+		if (!xl) {
+			return "not worn";
+		}
+		logger::info("spike: UnequipObject {} (list {:p})", NameOf(item->object), static_cast<void*>(xl));
+		const bool ok = player->UnequipObject(item->object, 1, xl, true, true);
+		return ok ? "unequipped" : "UnequipObject returned false";
+	}
+
+	std::string Store(std::uint32_t a_formID, int a_slot)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* storage = a_slot >= 0 && a_slot < settings::kMaxLoadouts ? g_storage[static_cast<std::size_t>(a_slot)] : nullptr;
+		auto* item = player ? Carried(player, a_formID) : nullptr;
+		if (!item || !storage) {
+			return !storage ? "no such container" : "not carried";
+		}
+		auto* xl = FirstList(item, false);
+		if (!xl) {
+			xl = FirstList(item, true);
+		}
+		logger::info("spike: RemoveItem {} x1 (list {:p}) -> {}", NameOf(item->object), static_cast<void*>(xl), settings::Name(a_slot));
+		player->RemoveItem(item->object, xl, 1, false, false, storage, nullptr, nullptr, false, false);
+		return "moved";
+	}
+
+	std::string Take(int a_slot)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* storage = a_slot >= 0 && a_slot < settings::kMaxLoadouts ? g_storage[static_cast<std::size_t>(a_slot)] : nullptr;
+		auto* items = Items(storage);
+		if (!player || !items) {
+			return "no such container, or it is empty";
+		}
+		int n = 0;
+		for (RE::ItemChange* item : *items) {
+			if (!item || !item->object || item->count <= 0) {
+				continue;
+			}
+			logger::info("spike: container RemoveItem {} x{} -> player", NameOf(item->object), item->count);
+			storage->RemoveItem(item->object, nullptr, item->count, false, false, player, nullptr, nullptr, false, false);
+			++n;
+		}
+		return std::format("{} stack(s) taken", n);
+	}
+
+	std::string Equip(std::uint32_t a_formID)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* item = player ? Carried(player, a_formID) : nullptr;
+		if (!item) {
+			return "not carried";
+		}
+		auto* xl = FirstList(item, false);
+		logger::info("spike: EquipObject {} (list {:p})", NameOf(item->object), static_cast<void*>(xl));
+		player->EquipObject(item->object, 1, xl, true, true);
+		return "EquipObject called";
 	}
 
 	json Contents()

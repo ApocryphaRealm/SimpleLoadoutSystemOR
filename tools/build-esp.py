@@ -8,8 +8,8 @@ loads) and no cell that ever loads (a new interior cell needs an Altar-side entr
 
     GLOB 0x800  SLSOR_ActiveLoadout       the active loadout (-1 = none); the game's save keeps it (OBSE64 has no co-save)
     CELL 0x801  SLSOR_StorageCell         interior holding cell, no doors, nothing ever enters it
-    REFR 0x802 .. 0x80B                   ten PERSISTENT references of Oblivion.esm's ChestHouseTreasuryMiddle02
-                                          (0x000A496D, DATA flags 0: NO "Respawns", so the engine never resets its
+    REFR 0x802 .. 0x80B                   ten PERSISTENT references of Oblivion.esm's ChestClutterLower01Empty
+                                          (0x000086C1, no items, DATA flags 0: NO "Respawns", so the engine never resets its
                                           contents - the same base as a player-home chest), owned by the player
                                           (XOWN 0x7). A persistent reference lives in memory and in the save whether
                                           or not its cell is loaded.
@@ -28,7 +28,7 @@ AUTHOR = "ApocryphaRealm"
 DESCRIPTION = "Simple Loadout System - one safe storage container per loadout"
 LOADOUTS = 10
 
-CHEST_BASE = 0x000A496D    # Oblivion.esm ChestHouseTreasuryMiddle02, never respawns (read from the ESM 2026-09-29)
+CHEST_BASE = 0x000086C1    # Oblivion.esm ChestClutterLower01Empty: no items, no Respawns flag (read from the ESM 2026-09-29; the first choice, ChestHouseTreasuryMiddle02, spawned loot in every reference)
 PLAYER_NPC = 0x00000007    # the Player's actor base, the owner of every container
 GLOBAL = 0x01000800
 CELL = 0x01000801
@@ -70,8 +70,11 @@ def glob() -> bytes:
 
 
 def cell() -> bytes:
-    # DATA (1 byte): 0x01 Is Interior Cell; XCLL: the interior lighting block (ambient, directional, fog, ...)
-    lighting = struct.pack("<IIIffIff", 0x00404040, 0x00404040, 0x00000000, 0.0, 0.0, 0, 0.0, 0.0) + struct.pack("<ffff", 0.0, 0.0, 0.0, 1.0)
+    # DATA (1 byte): 0x01 Is Interior Cell; XCLL: the interior lighting block, 36 bytes in Oblivion - ambient,
+    # directional, fog colour, fog near, fog far, rotation XY, rotation Z, directional fade, fog clip. The remaster's
+    # loader SKIPS THE WHOLE PLUGIN on a 48-byte block (found by bisection 2026-09-29: the same file with a 36-byte
+    # block loaded, and the game's plugin list simply omitted the file otherwise, with nothing logged).
+    lighting = struct.pack("<IIIffffff", 0x00404040, 0x00404040, 0x00000000, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     body = (sub(b"EDID", zstr("SLSOR_StorageCell")) +
             sub(b"FULL", zstr("Loadout Storage")) +
             sub(b"DATA", struct.pack("<B", 0x01)) +

@@ -13,6 +13,9 @@ namespace reflect
 	// -1 when the struct (or its supers) has no property of that name
 	std::int32_t Offset(UE::UStruct* a_struct, std::string_view a_name);
 
+	// a property's size in bytes (FProperty::ElementSize at +0x34); -1 when there is no such property
+	std::int32_t Size(UE::UStruct* a_struct, std::string_view a_name);
+
 	// a struct's own properties (a UFunction's parameters), in declaration order: name and offset
 	std::vector<std::pair<std::string, std::int32_t>> Fields(UE::UStruct* a_struct);
 

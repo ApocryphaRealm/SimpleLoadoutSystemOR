@@ -1,5 +1,7 @@
 // The TestBench driving tool (rules 31 and 64): sls.loadouts. Runs on TestBench's listener thread; every read of
 // game state is handed to the game thread (gamethread::Call) and waited for.
+#include "Bar.h"
+#include "Console.h"
 #include "GameThread.h"
 #include "Loadouts.h"
 #include "Menus.h"
@@ -41,6 +43,8 @@ namespace tool
 			j["game_thread"] = { { "installed", g.installed }, { "reads", g.reads }, { "rewritten", g.rewritten }, { "chained_after", g.previousTarget } };
 			j["queued_steps"] = gamethread::Queued();
 			j["loadout_count"] = settings::Get().count;
+			const auto b = bar::GetSnapshot();
+			j["bar"] = { { "built", b.built }, { "buttons", b.buttons }, { "layout", b.layout }, { "problem", b.problem } };
 			return j;
 		}
 
@@ -60,6 +64,33 @@ namespace tool
 				}
 				out["ok"] = true;
 				Write(a_sink, a_write, out);
+				return;
+			}
+			if (op == "storage") {
+				json out;
+				if (!gamethread::Call([&] { loadouts::Init(); out = State(); }, 5s)) {
+					Write(a_sink, a_write, { { "ok", false }, { "error", "the game thread did not answer in 5 s" } });
+					return;
+				}
+				out["ok"] = true;
+				Write(a_sink, a_write, out);
+				return;
+			}
+			if (op == "console") {
+				const std::string cmd = args.value("command", "");
+				bool ok = false;
+				const bool answered = gamethread::Call([&] { ok = console::Run(cmd); }, 5s);
+				Write(a_sink, a_write, { { "ok", answered && ok }, { "console", console::Status() }, { "command", cmd } });
+				return;
+			}
+			if (op == "unequip" || op == "store" || op == "take" || op == "equip") {
+				const auto id = static_cast<std::uint32_t>(std::stoul(args.value("formId", "0"), nullptr, 16));
+				const int slot = args.value("slot", 0);
+				std::string result;
+				const bool answered = gamethread::Call([&] {
+					result = op == "unequip" ? loadouts::Unequip(id) : op == "store" ? loadouts::Store(id, slot) : op == "take" ? loadouts::Take(slot) : loadouts::Equip(id);
+				}, 5s);
+				Write(a_sink, a_write, { { "ok", answered }, { "result", answered ? result : "the game thread did not answer in 5 s" } });
 				return;
 			}
 			if (op == "select" || op == "deselect") {

@@ -26,6 +26,18 @@ namespace reflect
 		return -1;
 	}
 
+	std::int32_t Size(UE::UStruct* a_struct, std::string_view a_name)
+	{
+		for (UE::UStruct* s = a_struct; s; s = s->superStruct) {
+			for (auto* f = reinterpret_cast<std::uint8_t*>(s->childProperties); f; f = *reinterpret_cast<std::uint8_t**>(f + kFieldNext)) {
+				if (pe::Utf8(reinterpret_cast<const UE::FName*>(f + kFieldName)->ToString()) == a_name) {
+					return *reinterpret_cast<const std::int32_t*>(f + 0x34);
+				}
+			}
+		}
+		return -1;
+	}
+
 	std::vector<std::pair<std::string, std::int32_t>> Fields(UE::UStruct* a_struct)
 	{
 		std::vector<std::pair<std::string, std::int32_t>> out;

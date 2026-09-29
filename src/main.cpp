@@ -1,6 +1,7 @@
 // Simple Loadout System (Oblivion Remastered) - entry point.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "Bar.h"
 #include "GameThread.h"
 #include "Loadouts.h"
 #include "Menus.h"
@@ -46,9 +47,16 @@ namespace
 		// (a start-up crashed in UObjectArray, 2026-09-29).
 		reflect::SelfCheck();
 		menus::Tick();
-		if (!storageInit && RE::PlayerCharacter::GetSingleton()) {
-			storageInit = true;
+		bar::Tick();
+		// The storage is looked for again every 5 s until it is all there (rule 17: a first miss is not permanent -
+		// the plugin's records may load after the player object exists), a dozen times at most.
+		static int storageTries = 0;
+		static auto nextStorageTry = std::chrono::steady_clock::now();
+		if (!storageInit && RE::PlayerCharacter::GetSingleton() && now >= nextStorageTry) {
+			++storageTries;
+			nextStorageTry = now + 5s;
 			loadouts::Init();
+			storageInit = loadouts::StorageReady() == settings::kMaxLoadouts || storageTries >= 12;
 			WriteSelfCheck();
 		}
 		if (!toolRegistered) {
@@ -60,8 +68,9 @@ namespace
 		}
 	}
 
-	void OnMenu(UE::UObject*, bool)
+	void OnMenu(UE::UObject* a_menu, bool a_open)
 	{
+		bar::OnInventory(a_menu, a_open);
 		WriteSelfCheck();
 	}
 
