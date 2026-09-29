@@ -122,6 +122,63 @@ namespace bar
 			}
 		}
 
+		std::string ClassName(UE::UObject* a_o);
+
+		// a property's bytes from one object into a differently named property of another (same struct type)
+		void CopyPropertyAs(UE::UObject* a_to, std::string_view a_toName, UE::UObject* a_from, std::string_view a_fromName)
+		{
+			if (!a_to || !a_from) {
+				return;
+			}
+			const auto to = reflect::Offset(a_to->GetClass(), a_toName);
+			const auto from = reflect::Offset(a_from->GetClass(), a_fromName);
+			const auto size = reflect::Size(a_from->GetClass(), a_fromName);
+			if (to >= 0 && from >= 0 && size > 0 && size == reflect::Size(a_to->GetClass(), a_toName)) {
+				std::memcpy(reinterpret_cast<std::uint8_t*>(a_to) + to, reinterpret_cast<std::uint8_t*>(a_from) + from, static_cast<std::size_t>(size));
+			}
+		}
+
+		// The game's standard button (WBP_ModernPrefab_Button_C) has a style with hover and press sounds; the invisible
+		// button's style has none. The sounds go into our buttons' override slots (the owner, 2026-09-29: the sound
+		// effect for scrolling the boxes), the look stays ours.
+		void GiveButtonSounds(UE::UObject* a_button)
+		{
+			static UE::UObject* styleCdo = nullptr;
+			if (!styleCdo) {
+				auto* stdClass = ue::Class(L"/Game/UI/Modern/Prefabs/Buttons/WBP_ModernPrefab_Button.WBP_ModernPrefab_Button_C");
+				auto* stdCdo = stdClass ? stdClass->GetDefaultObject(false) : nullptr;
+				auto** styleClass = stdCdo ? reflect::At<UE::UClass*>(stdCdo, reflect::Offset(stdClass, "Style")) : nullptr;
+				styleCdo = styleClass && *styleClass ? (*styleClass)->GetDefaultObject(false) : nullptr;
+				logger::info("bar: button sounds from {}", styleCdo ? ClassName(styleCdo) : std::string("NOTHING - the standard button style was not found"));
+			}
+			if (!styleCdo) {
+				return;
+			}
+			CopyPropertyAs(a_button, "HoveredSlateSoundOverride", styleCdo, "HoveredSlateSound");
+			CopyPropertyAs(a_button, "PressedSlateSoundOverride", styleCdo, "PressedSlateSound");
+			CopyPropertyAs(a_button, "SelectedHoveredSlateSoundOverride", styleCdo, "HoveredSlateSound");
+			CopyPropertyAs(a_button, "SelectedPressedSlateSoundOverride", styleCdo, "PressedSlateSound");
+		}
+
+		// The game's own UI sounds: Wwise events posted on the player controller (UAkAudioEvent::PostOnActor). ui_glb_hover
+		// is what the menus play as the highlight moves, ui_glb_select on a choice (the owner, 2026-09-29: the sound
+		// effect for scrolling the boxes).
+		void PlayUiSound(const wchar_t* a_eventPath)
+		{
+			auto* ev = ue::Find(a_eventPath);
+			auto* pc = PlayerController();
+			if (!ev || !pc) {
+				return;
+			}
+			ue::Call c(ev, L"PostOnActor");
+			c.Set("Actor", pc);
+			c.Set("CallbackMask", std::int32_t(0));
+			c.Set("bStopWhenAttachedObjectDestroyed", false);
+			c.Run();
+		}
+		constexpr const wchar_t* kSoundHover = L"/Game/WwiseAudio/Interface/Global/Redesign/ui_glb_hover.ui_glb_hover";
+		constexpr const wchar_t* kSoundSelect = L"/Game/WwiseAudio/Interface/Global/Redesign/ui_glb_select.ui_glb_select";
+
 		UE::UClass* LoadClass(const wchar_t* a_package, const wchar_t* a_asset)
 		{
 			static auto* lib = ue::Class(L"/Script/Engine.KismetSystemLibrary");
@@ -648,6 +705,7 @@ namespace bar
 			const int target = g_cursor == loadouts::Active() ? -1 : g_cursor;
 			// The switch itself stays DISARMED until the engine's equip route is proven (Actor::UnequipObject took the
 			// game down on 2026-09-29): the press is logged and the highlight moves, nothing moves in the inventory.
+			PlayUiSound(kSoundSelect);
 			logger::info("bar: A on {} -> would {} (switch disarmed until the equip route is proven)", settings::Name(g_cursor), target < 0 ? "deselect" : "select");
 			Refresh();
 		}
@@ -702,8 +760,13 @@ namespace bar
 				if (row == 0 || row == -1) {
 					g_swallow |= XINPUT_GAMEPAD_DPAD_UP;   // the game never steps onto anything above the list
 					const int i = std::clamp(g_cursor, 0, static_cast<int>(g_entries.size()) - 1);
-					NavigateTo(g_entries[static_cast<std::size_t>(i)].button, "the loadout row");   // the game's focus lands on the button: A clicks it, its sounds play
+					NavigateTo(g_entries[static_cast<std::size_t>(i)].button, "the loadout row");   // the game's focus lands on the button: A clicks it
 					Focus(true);
+					PlayUiSound(kSoundHover);
+					// the list keeps its SELECTION highlighted after its focus leaves (the owner, 2026-09-29: the Steel
+					// Claymore stayed lit while the row had the focus) - cleared, so only the focused box is lit
+					ue::Call clear(g_listWrapper, L"ClearSelection");
+					clear.Run();
 				} else if (row == -2) {
 					g_upHeld = true;   // no index to read: a hold reaches the row
 					g_upHeldSince = Clock::now();
@@ -722,6 +785,7 @@ namespace bar
 			if (a_pressed & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) {
 				Move((a_pressed & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : +1);
 				NavigateTo(g_entries[static_cast<std::size_t>(std::clamp(g_cursor, 0, count - 1))].button, "the next box");
+				PlayUiSound(kSoundHover);
 			}
 			if (a_pressed & (XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_B)) {
 				Focus(false);
