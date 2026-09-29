@@ -2,7 +2,7 @@
 
 Newest first. Versions are issued by the version gate; a number here is one a build earned by working in game.
 
-## Unversioned - 2026-09-29 - in progress
+## 1.0.0 - 2026-09-29 - working
 
 The loadout switch works end to end, in game (the owner, 09:47): five brown loadout boxes below the inventory's
 category tabs, D-pad Up from the top row into them, Left / Right along them, Down / B back to the top row, LT / RT
