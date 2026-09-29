@@ -14,7 +14,7 @@ add_shflags("/PDBALTPATH:%_PDB%", {force = true})
 includes("lib/commonlibob64")
 
 set_project("SimpleLoadoutSystem")
-set_version("0.0.0")
+set_version("1.0.0")
 set_license("GPL-3.0-or-later")
 set_languages("c++23")
 set_warnings("allextra")
