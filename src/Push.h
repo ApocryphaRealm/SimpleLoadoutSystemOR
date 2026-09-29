@@ -14,4 +14,5 @@ namespace push
 {
 	bool Install();     // at the first frame: the rebuild function found; false (logged) when the pattern is missing
 	bool Rebuild();     // TES thread only: the game's rebuild-and-push; false when it is not found
+	bool Installed();
 }

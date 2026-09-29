@@ -96,6 +96,14 @@ namespace tool
 				Write(a_sink, a_write, { { "ok", answered }, { "result", answered ? result : "the game thread did not answer in 5 s" } });
 				return;
 			}
+			if (op == "additem") {
+				const auto id = static_cast<std::uint32_t>(std::stoul(args.value("formId", "0"), nullptr, 16));
+				const int count = args.value("count", 1);
+				std::string why;
+				const bool ok = loadouts::AddItem(id, count, why);
+				Write(a_sink, a_write, { { "ok", ok }, { "error", why }, { "formId", std::format("{:08X}", id) }, { "count", count } });
+				return;
+			}
 			if (op == "select" || op == "deselect") {
 				const int slot = op == "select" ? args.value("slot", 0) : -1;
 				std::string why;
@@ -127,7 +135,7 @@ namespace tool
 				Write(a_sink, a_write, { { "ok", true }, { "queued", steps.size() } });
 				return;
 			}
-			Write(a_sink, a_write, { { "ok", false }, { "error", "op: state (default) | select {slot} | deselect | press {steps:[{buttons:[a,b,x,y,lb,rb,up,down,left,right,start,back], ms}]}" } });
+			Write(a_sink, a_write, { { "ok", false }, { "error", "op: state (default) | select {slot} | deselect | additem {formId, count} | press {steps:[{buttons:[a,b,x,y,lb,rb,up,down,left,right,start,back], ms}]}" } });
 		}
 	}
 

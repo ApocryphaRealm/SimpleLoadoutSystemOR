@@ -1,5 +1,7 @@
 #include "Settings.h"
 
+#include "Strings.h"
+
 namespace settings
 {
 	namespace
@@ -75,7 +77,7 @@ namespace settings
 		if (a_loadout >= 0 && a_loadout < static_cast<int>(n.size()) && !n[static_cast<std::size_t>(a_loadout)].empty()) {
 			return n[static_cast<std::size_t>(a_loadout)];
 		}
-		return std::format("Loadout {}", a_loadout + 1);
+		return std::format("{} {}", TR("SLS_Loadout", "Loadout"), a_loadout + 1);   // rule 66: the word from the eleven files
 	}
 
 	std::string DefaultIniText()

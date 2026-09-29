@@ -32,6 +32,8 @@ namespace push
 		return true;
 	}
 
+	bool Installed() { return g_rebuild != nullptr; }
+
 	bool Rebuild()
 	{
 		if (!g_rebuild) {

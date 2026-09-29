@@ -40,5 +40,8 @@ namespace loadouts
 	std::string Store(std::uint32_t a_formID, int a_slot); // RemoveItem of one piece into that loadout's container
 	std::string Take(int a_slot);                          // the container's items back to the player (not equipped)
 	std::string Equip(std::uint32_t a_formID);             // EquipObject (address library) on a carried piece
-	std::string Wear(std::uint32_t a_formID);              // the vtable's AddWornItem on a carried piece (the mod's own route)
+	std::string Wear(std::uint32_t a_formID);              // the vtable's AddWornItem on a carried piece
+	// A test's mass spawn (the owner, 2026-09-29: over-encumber the player for Weightless): AddObjectToContainer on the
+	// TES thread - container changes from any other thread hit the engine's thread trap. Posted; the log reports.
+	bool AddItem(std::uint32_t a_formID, int a_count, std::string& a_why);
 }

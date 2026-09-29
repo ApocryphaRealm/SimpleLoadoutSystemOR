@@ -542,6 +542,31 @@ namespace loadouts
 		return ok ? "worn" : "AddWornItem returned false";
 	}
 
+	bool AddItem(std::uint32_t a_formID, int a_count, std::string& a_why)
+	{
+		auto* form = RE::TESForm::LookupByID(a_formID);
+		auto* object = form ? form->As<RE::TESBoundObject>() : nullptr;
+		if (!object) {
+			a_why = form ? "not an item" : "no such form";
+			return false;
+		}
+		if (a_count < 1 || a_count > 1000) {
+			a_why = "count must be 1..1000";
+			return false;
+		}
+		if (!testhread::Installed()) {
+			a_why = "the TES thread is not hooked yet";
+			return false;
+		}
+		testhread::Post([object, a_count] {
+			if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+				player->AddObjectToContainer(object, nullptr, a_count);
+				logger::info("additem: {} x{} added to the player (TES thread)", NameOf(object), a_count);
+			}
+		});
+		return true;
+	}
+
 	json Contents()
 	{
 		json j;

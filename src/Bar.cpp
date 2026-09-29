@@ -4,6 +4,7 @@
 #include "Menus.h"
 #include "Push.h"
 #include "Settings.h"
+#include "Strings.h"
 #include "Ue.h"
 
 #include <set>
@@ -1022,6 +1023,7 @@ namespace bar
 	void OnInventory(UE::UObject*, bool a_open)
 	{
 		if (a_open) {
+			strings::Refresh();   // the game's language may have changed since the last build
 			g_pending = true;   // built on the next frames, once the menu has constructed its parts
 			g_tries = 0;
 		} else {

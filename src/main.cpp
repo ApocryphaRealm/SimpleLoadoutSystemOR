@@ -19,14 +19,17 @@ namespace
 	void WriteSelfCheck()
 	{
 		const auto g = gamethread::GetStatus();
+		const auto t = testhread::GetStatus();
 		const auto path = settings::PluginFolder() / L"SimpleLoadoutSystem.selfcheck.txt";
 		const std::string text = std::format(
 			"Simple Loadout System {} self-check\nINI: {}\nloadouts: {}\ngame thread: {} (reads {}, chained after {})\n"
-			"reflection: {}\nstorage containers found: {} of {}\nactive loadout: {}\ninventory menu: {}\n",
+			"reflection: {}\nstorage containers found: {} of {}\nactive loadout: {}\ninventory menu: {}\n"
+			"TES thread: {} (thread {}, {} loop calls)\nlist rebuild: {}\n",
 			SLS_VERSION, settings::Get().iniFound ? "read" : "NOT FOUND (defaults)", settings::Get().count,
 			g.installed ? "installed" : "NOT installed", g.reads, g.previousTarget.empty() ? "-" : g.previousTarget,
 			reflect::Ok() ? "proven" : "not yet proven", loadouts::StorageReady(), settings::kMaxLoadouts,
-			loadouts::Active() >= 0 ? settings::Name(loadouts::Active()) : "none", menus::InventoryOpen() ? "open" : "closed");
+			loadouts::Active() >= 0 ? settings::Name(loadouts::Active()) : "none", menus::InventoryOpen() ? "open" : "closed",
+			t.installed ? "hooked" : "NOT hooked", t.thread, t.calls, push::Installed() ? "found" : "NOT found");
 		FILE* f = nullptr;
 		if (_wfopen_s(&f, path.c_str(), L"wb") == 0 && f) {
 			std::fwrite(text.data(), 1, text.size(), f);
