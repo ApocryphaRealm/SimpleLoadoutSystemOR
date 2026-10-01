@@ -32,8 +32,12 @@ INSTALLATION
     users need Root Builder for the OBSE plugin, as for every OBSE64 mod - and the .esp must reach the real
     Data folder too (the game's plugin loader does not read through MO2's virtual folder), which Root Builder
     does when the file sits under Root\OblivionRemastered\Content\Dev\ObvData\Data\.
+    Put a second copy of SimpleLoadoutSystem.esp in the mod's own Data\ folder as well: Mod Organizer 2 lists
+    (and keeps in plugins.txt) only the plugins it sees there, and removes any other line from plugins.txt when
+    it closes - the loadouts then stop working on the next launch, with no error.
   * Enable SimpleLoadoutSystem.esp in the load order (Plugins.txt). The plugin adds one cell and ten
-    chests; it changes nothing of the game's.
+    chests; it changes nothing of the game's. If the loadout boxes show none as active and pressing one does
+    nothing, the plugin is not loaded: check it is still enabled.
   * Start the game through OBSE64. Requires OBSE64 and Address Library for OBSE Plugins.
 
 SETTINGS
