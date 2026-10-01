@@ -108,11 +108,18 @@ namespace bar
 			if (!lib || !cls || !pc) {
 				return nullptr;
 			}
+			if (ue::Dying(pc)) {   // a controller being torn down (quitting to the menu) is no world context
+				logger::debug("bar: Create refused - the player controller is being destroyed");
+				return nullptr;
+			}
 			ue::Call c(lib->GetDefaultObject(false), L"Create");
 			c.Set("WorldContextObject", pc);
 			c.Set("WidgetType", cls);
 			c.Set("OwningPlayer", pc);
-			c.Run();
+			if (!c.RunGuarded()) {
+				logger::warn("bar: CreateWidget faulted inside the engine - no widget this time");
+				return nullptr;
+			}
 			return c.Get<UE::UObject*>("ReturnValue");
 		}
 

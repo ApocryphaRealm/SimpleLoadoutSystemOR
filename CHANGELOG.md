@@ -2,6 +2,25 @@
 
 Newest first. Versions are issued by the version gate; a number here is one a build earned by working in game.
 
+## 1.0.1 - 2026-09-30 - untested
+
+### Fixed (installation)
+- **Mod Organizer 2 dropped the storage plugin from the load order** (the owner, 2026-09-30: after loading a save, no
+  loadout box showed as active and pressing one did nothing). MO2 lists - and keeps in plugins.txt - only the plugins
+  at the top level of a mod's folder, and removes every other plugins.txt line when it starts or closes; this mod's
+  ESP sat only under Root\ (where Root Builder copies it into the real Data folder the game reads), so the line went
+  and the chests and the active-loadout global were never loaded - silently. The README now tells MO2 users to keep a
+  second copy of SimpleLoadoutSystem.esp at the mod folder's top level, and what the symptom means if it happens.
+  Proven in the owner's instance: with the top-level copy the line survived MO2's start and close, and the loadouts
+  worked in game.
+
+### Fixed (stability)
+- The loadout boxes' widget creation runs fault-guarded and refuses a player controller that is being destroyed (gate
+  rule or-world-context-calls-are-guarded, from Minimap Menu's crash on quitting to the menu, 2026-09-30).
+- The "is this widget still alive" check reads the widget's slot index under a fault guard, so a widget the game has
+  already garbage-collected returns "gone" instead of crashing (Apocrypha Menu Framework's crash on a loadout swap,
+  2026-09-30, was this check reading freed memory).
+
 ## 1.0.0 - 2026-09-29 - working
 
 The loadout switch works end to end, in game (the owner, 09:47): five brown loadout boxes below the inventory's

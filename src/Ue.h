@@ -27,6 +27,26 @@ namespace ue
 		return UE::StaticFindObject<UE::UClass>(nullptr, nullptr, a_path);
 	}
 
+	// ProcessEvent inside __try/__except: a call whose world was torn down under its context returns false instead of
+	// taking the game down (2026-09-30, Minimap Menu's crash on quit; gate rule or-world-context-calls-are-guarded)
+	inline bool GuardedProcessEvent(UE::UObject* a_obj, UE::UFunction* a_fn, void* a_params)
+	{
+		__try {
+			a_obj->ProcessEvent(a_fn, a_params);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	// an object being destroyed or garbage: never a world context
+	inline bool Dying(UE::UObject* a_o)
+	{
+		if (!a_o || !reflect::IsLive(a_o)) return true;
+		constexpr std::int32_t kObject = 0x00008000 | 0x00010000 | 0x20000000 | 0x40000000;   // BeginDestroyed, FinishDestroyed, PendingKill, Garbage
+		return (static_cast<std::int32_t>(a_o->objectFlags) & kObject) != 0;
+	}
+
 	// A reflected call: parameters by name, laid out from the UFunction's own properties.
 	class Call
 	{
@@ -81,6 +101,10 @@ namespace ue
 			}
 			m_obj->ProcessEvent(m_fn, m_params.data());
 			return true;
+		}
+		bool RunGuarded()
+		{
+			return m_fn && m_obj && GuardedProcessEvent(m_obj, m_fn, m_params.data());
 		}
 
 	private:

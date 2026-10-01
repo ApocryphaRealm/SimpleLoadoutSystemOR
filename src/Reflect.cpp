@@ -126,13 +126,28 @@ namespace reflect
 		return out;
 	}
 
+	namespace
+	{
+		// the object's own internalIndex, read under SEH: a garbage-collected object's memory may already be returned to
+		// Windows (Apocrypha Menu Framework crashed reading it on a freed System page, 2026-09-30)
+		bool ReadIndex(const UE::UObject* a_o, std::int32_t& a_out)
+		{
+			__try {
+				a_out = a_o->internalIndex;
+				return true;
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				return false;
+			}
+		}
+	}
+
 	bool IsLive(UE::UObject* a_o)
 	{
 		auto* arr = UE::FUObjectArray::GetSingleton();
-		if (!a_o || !arr) {
+		std::int32_t idx = -1;
+		if (!a_o || !arr || !ReadIndex(a_o, idx)) {
 			return false;
 		}
-		const std::int32_t idx = a_o->internalIndex;
 		if (idx < 0 || idx >= arr->GetObjectArrayNum()) {
 			return false;
 		}
